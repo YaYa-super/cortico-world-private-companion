@@ -96,6 +96,22 @@ test('世界层：捕获情绪 → 上下文出现“今天”和情绪回声', 
   const mind = await panel.invokeMemoryPanel('memory', 'mind', [50, '']) as { events: Array<{ type: string }> };
   assert.ok(mind.events.some((event) => event.type === 'echo'));
 
+  const tools = world as unknown as {
+    toolRemember: (args: Record<string, unknown>) => Promise<unknown>;
+  };
+  await tools.toolRemember({
+    kind: 'episode',
+    text: '今天累死了，又加班',
+    scope: 'main',
+    importance: 0.7,
+  });
+  const recent2 = await panel.invokeMemoryPanel('memory', 'recent', []) as {
+    recent: Array<{ text: string; emotion: string }>;
+  };
+  const tagged = recent2.recent.find((row) => row.text.includes('今天累死了'));
+  assert.ok(tagged);
+  assert.equal(tagged.emotion, '疲惫');
+
   await world.stop();
 
   const context = pushed.filter((item) => item.type === 'companion.context').map((item) => item.text).join('\n');

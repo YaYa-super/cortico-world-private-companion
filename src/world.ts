@@ -368,8 +368,8 @@ export class CompanionWorld implements World {
           importance: record.importance,
           text: record.text.slice(0, 160),
           emotion: record.details?.userEmotion?.label
-            ?? record.details?.howIFelt?.slice(0, 12)
-            ?? (record.tags.includes('musing') ? '走神' : '平淡'),
+            ?? (record.kind === 'episode' ? detectEmotion(record.text)?.label : undefined)
+            ?? (record.tags.includes('musing') ? '走神' : '未标注'),
           musing: record.tags.includes('musing'),
         }));
       return { recent: rows };
@@ -806,9 +806,10 @@ export class CompanionWorld implements World {
       prepared.push({
         kind,
         text,
-        details: record.details && typeof record.details === 'object'
-          ? record.details as Record<string, unknown>
-          : undefined,
+        details: this.withInferredEmotion(kind, text,
+          record.details && typeof record.details === 'object'
+            ? record.details as Record<string, unknown>
+            : undefined),
         importance: typeof record.importance === 'number' ? record.importance : 0.6,
       });
     }
@@ -1103,6 +1104,7 @@ export class CompanionWorld implements World {
     if (args.userEmotion && typeof args.userEmotion === 'object') {
       details.userEmotion = args.userEmotion;
     }
+    const enriched = this.withInferredEmotion(kind, text, details);
     const result = this.memoryStore.add({
       kind,
       text,
@@ -1113,7 +1115,7 @@ export class CompanionWorld implements World {
         : (musing ? 0.25 : 0.55),
       source: musing ? 'muse' : 'tool',
       tags,
-      details: details as never,
+      details: enriched as never,
     });
     if (!result.added) return `这条已经记过了（${kind}，id ${result.id.slice(0, 8)}），没有重复写入。`;
     this.snapshot?.invalidate();
@@ -1122,6 +1124,21 @@ export class CompanionWorld implements World {
       kind,
     });
     return `记下了（${kind}）。`;
+  }
+
+  /** episode 没显式写 userEmotion 时，按文本做一次保守识别；只补空，不覆盖模型/手工标签。 */
+  private withInferredEmotion(
+    kind: MemoryKind,
+    text: string,
+    details?: Record<string, unknown>,
+  ): Record<string, unknown> | undefined {
+    if (kind !== 'episode') return details;
+    const out = details ? { ...details } : {};
+    if (!out.userEmotion) {
+      const signal = detectEmotion(text);
+      if (signal) out.userEmotion = { label: signal.label, intensity: signal.intensity };
+    }
+    return Object.keys(out).length ? out : undefined;
   }
 
   private fail(text: string): ToolOutcome {
