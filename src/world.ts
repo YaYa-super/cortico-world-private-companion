@@ -1,0 +1,1444 @@
+/**
+ * 「我会永远陪着你」的 Coopanion 实现：角色自己的一天 + 主动开口 + 关系卡 + 日记，
+ * 以及一组让模型自己维护这些状态的工具。
+ *
+ * 与 AstrBot 原插件的差别（详见 README）：这里不接管对话、不碰平台、不做 TTS/生图/识屏，
+ * 只管“它自己的生活在动”和“什么时候它想开口”。人格仍由 CONSTITUTION.md 提供。
+ */
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
+import type {
+  ToolDef, ToolOutcome, World, WorldHost, WorldWebUiDecl,
+} from 'cortico/core/types.ts';
+import type { WorldContext } from 'cortico/world.ts';
+import { COMPANION_CONFIG_GROUP, type CompanionConfig } from './config.ts';
+import {
+  advance, agendaLine, createInitialState, currentItem, dueHm, generateAgenda, isSleeping, moodLabel,
+  nextDueAt, upcomingItem, type AgendaItem, type CompanionState,
+} from './state.ts';
+import { buildContextText, buildProactiveText, contextSignature } from './context.ts';
+import { TOOL_SPECS } from './tools.ts';
+import { evaluate, reasonFor } from './proactive.ts';
+import { SnapshotPusher } from './snapshot.ts';
+import { detectEmotion, relatedWords } from './emotion.ts';
+import { MindLog, type MindType } from './mind.ts';
+import { MEMORY_KINDS, MemoryStore, scopeKey, type MemoryKind, type MemoryRecord } from './memory-store.ts';
+import { isHumanEvent, scopeOfEvent } from './event-filter.ts';
+import {
+  MAIN_KEY, appendJournal, ensureDir, journalPath, readJournal, readJson, writeJsonAtomic,
+  type JournalEntry, type Profile, type ProfileMap,
+} from './store.ts';
+import { formatLocal, hmToMinutes, humanSpan, inWindow, localParts } from './time.ts';
+
+const ENV_PROMPT_FILE = fileURLToPath(new URL('../ENV_PROMPT.md', import.meta.url));
+const TICK_MS = 60_000;
+/** 换行常量：避免补丁脚本把 \n 转义弄丢。 */
+const NL = String.fromCharCode(10);
+const SAVE_EVERY_MS = 20_000;
+const STATE_FILE = 'state.json';
+const PROFILES_FILE = 'profiles.json';
+
+function clampNumber(n: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, n));
+}
+
+function trimText(v: unknown, limit = 200): string {
+  return typeof v === 'string' ? v.replace(/\s+/g, ' ').trim().slice(0, limit) : '';
+}
+
+/** 免打扰/睡觉窗口结束后再过多久才允许开口。 */
+function nextWindowEnd(now: Date, tz: string, start: string, end: string): Date | null {
+  const p = localParts(now, tz);
+  const endMin = hmToMinutes(end);
+  if (endMin === null) return null;
+  const delta = (endMin - p.minutes + 1440) % 1440;
+  return new Date(now.getTime() + (delta === 0 ? 1440 : delta) * 60_000 + 10 * 60_000);
+}
+
+export class CompanionWorld implements World {
+  readonly id = 'companion';
+  private readonly ctx: WorldContext<CompanionConfig>;
+  private host: WorldHost | null = null;
+  private state: CompanionState;
+  private profiles: ProfileMap = {};
+  private dataDir: string;
+  private readonly memoryStore: MemoryStore;
+  private readonly mindLog: MindLog;
+  private lastMindGate = '';
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private snapshot: SnapshotPusher | null = null;
+  private lastSaveAt = 0;
+  private lastUserProbe = 0;
+  private lastUserAt: number | null = null;
+  private stopped = false;
+  private proactiveInFlight = false;
+  private lastContextDelivered = false;
+  private tickRunning = false;
+  private tickPromise: Promise<void> | null = null;
+  private pendingReviewIds: string[] = [];
+
+  constructor(ctx: WorldContext<CompanionConfig>) {
+    this.ctx = ctx;
+    const base = typeof ctx.dataDir === 'string' && ctx.dataDir ? ctx.dataDir : '.';
+    this.dataDir = join(base, 'private-companion');
+    this.memoryStore = new MemoryStore(join(this.dataDir, 'memory'), undefined, { lock: true });
+    this.mindLog = new MindLog(join(this.dataDir, 'mind.jsonl'), 500);
+    this.state = createInitialState(new Date(), this.tz(), this.cfg());
+    this.load();
+  }
+
+  private cfg(): CompanionConfig {
+    return this.ctx.cfg;
+  }
+
+  private tz(): string {
+    return this.ctx.timezone || 'Asia/Shanghai';
+  }
+
+  private load(): void {
+    try {
+      ensureDir(this.dataDir);
+      const raw = readJson<Partial<CompanionState> | null>(join(this.dataDir, STATE_FILE), null);
+      if (raw && typeof raw === 'object' && typeof raw.day === 'string') {
+        this.state = {
+          ...createInitialState(new Date(), this.tz(), this.cfg()),
+          ...raw,
+          agenda: Array.isArray(raw.agenda) ? (raw.agenda as AgendaItem[]) : [],
+        };
+      }
+      this.profiles = readJson<ProfileMap>(join(this.dataDir, PROFILES_FILE), {});
+    } catch {
+      // 读不出来就用初始状态，不阻止挂载
+    }
+  }
+
+  private save(force = false): void {
+    const now = Date.now();
+    if (!force && now - this.lastSaveAt < SAVE_EVERY_MS) return;
+    this.lastSaveAt = now;
+    try {
+      ensureDir(this.dataDir);
+      writeJsonAtomic(join(this.dataDir, STATE_FILE), this.state);
+      writeJsonAtomic(join(this.dataDir, PROFILES_FILE), this.profiles);
+    } catch (error) {
+      this.host?.log.warn('[companion] 状态落盘失败', String(error));
+    }
+  }
+
+  // ---- World 契约 ----
+
+  envPromptVars(): Record<string, string> {
+    this.refreshState();
+    const cfg = this.cfg();
+    const count = this.countToday();
+    const gates = cfg.proactiveEnabled
+      ? `主动联系：开启。免打扰 ${cfg.quietStart}-${cfg.quietEnd}；两次之间至少 ${cfg.proactiveMinGapMin} 分钟；每天最多 ${cfg.proactiveDailyCap || '不限'} 次（今天已 ${count} 次）。`
+      : '主动联系：关闭（只在对方开口时回应，不主动找人）。';
+    return {
+      'companion.gates': gates,
+      'companion.styleNote': trimText(cfg.styleNote, 600),
+    };
+  }
+
+  tools(): ToolDef[] {
+    return TOOL_SPECS.map((spec) => ({
+      name: spec.name,
+      description: spec.description,
+      parameters: spec.parameters,
+      tags: spec.tags,
+      handler: async (args: Record<string, unknown>) => {
+        try {
+          return await this.dispatch(spec.name, args ?? {});
+        } catch (error) {
+          return {
+            text: `⚠ 调用失败：${error instanceof Error ? error.message : String(error)}`,
+            failed: true,
+          };
+        }
+      },
+    }));
+  }
+
+  private dispatch(name: string, args: Record<string, unknown>): Promise<string> {
+    switch (name) {
+      case 'companion_state':
+        return this.toolState(args);
+      case 'companion_agenda':
+        return this.toolAgenda(args);
+      case 'companion_profile':
+        return this.toolProfile(args);
+      case 'companion_journal':
+        return this.toolJournal(args);
+      case 'companion_proactive':
+        return this.toolProactive(args);
+      case 'companion_recall':
+        return this.toolRecall(args);
+      case 'companion_remember':
+        return this.toolRemember(args);
+      case 'companion_memory':
+        return this.toolMemory(args);
+      case 'companion_consolidate':
+        return this.toolConsolidate(args);
+      default:
+        return Promise.resolve(`未知工具 ${name}`);
+    }
+  }
+
+  webUi(): WorldWebUiDecl {
+    const cfg = this.cfg();
+    const state = this.state;
+    const count = this.countToday();
+    let stat = '尚未读取';
+    try {
+      stat = `状态 ${statSync(join(this.dataDir, STATE_FILE)).mtime.toLocaleString('zh-CN')}`;
+    } catch {
+      // 还没落盘
+    }
+    return {
+      label: '我会永远陪着你',
+      lamps: [
+        {
+          label: '主动联系',
+          state: cfg.proactiveEnabled ? 'online' : 'offline',
+          hint: cfg.proactiveEnabled ? `下一次约 ${dueHm(state.proactiveDueAt, this.tz())}` : '已关闭',
+        },
+        {
+          label: '生活',
+          state: state.sleeping ? 'loading' : 'online',
+          hint: state.sleeping ? '在睡觉' : `正在${state.activity}`,
+        },
+        {
+          label: '记忆',
+          state: cfg.memoryEnabled ? 'online' : 'offline',
+          hint: cfg.memoryEnabled
+            ? `记录 ${this.memoryStore.stats().records} · 事件 ${this.memoryStore.stats().events}`
+            : '已关闭',
+        },
+      ],
+      badges: [
+        { label: '精力', value: Math.round(state.energy), tone: state.energy < 35 ? 'off' : 'on' },
+        { label: '心情', value: moodLabel(state.mood), tone: state.mood < 40 ? 'off' : 'plain' },
+        { label: '今日主动', value: `${count}/${cfg.proactiveDailyCap || '∞'}` },
+      ],
+      promptDocs: [
+        {
+          key: 'worlds.companion.envPrompt',
+          title: '我会永远陪着你 · 环境提示词',
+          description: '进 system 前缀的那一段：过日子与说话的分寸。改这里不用改代码。',
+          path: ENV_PROMPT_FILE,
+          role: 'envPrompt',
+          vars: [
+            { name: 'companion.gates', description: '当前主动联系的规则摘要（免打扰/间隔/上限）', multiline: false },
+            { name: 'companion.styleNote', description: '设置页里的「风格补充」，留空则整段为空', multiline: true },
+          ],
+        },
+      ],
+      config: [COMPANION_CONFIG_GROUP],
+      panels: [
+        {
+          id: 'memory',
+          title: '记忆',
+          description: '只读查看：概览、检索、合并摘要；可以撤销合并。导入审核仍走 CLI。',
+        },
+      ],
+      invoke: (panel, method, args) => this.invokeMemoryPanel(panel, method, args),
+      storage: [
+        {
+          key: 'companion-state',
+          label: '状态 / 日程 / 关系卡 / 日记',
+          kind: 'disk',
+          location: this.dataDir,
+          danger: true,
+          note: '清空后它今天的生活、关系卡与日记都会重置，不可恢复。',
+          stat: () => {
+            const journal = readJournal(this.dataDir, 500).length;
+            const mem = this.memoryStore.stats();
+            return `${stat} · 日程 ${this.state.agenda.length} 项 · 关系卡 ${Object.keys(this.profiles).length} 张 · 日记 ${journal} 条`
+              + ` · 记忆 ${mem.records} 条 / 事件 ${mem.events} 条`;
+          },
+          clear: () => {
+            this.state = createInitialState(new Date(), this.tz(), this.cfg());
+            this.profiles = {};
+            try {
+              writeFileSync(journalPath(this.dataDir), '', 'utf8');
+            } catch {
+              // 文件不存在就算了
+            }
+            this.save(true);
+            this.snapshot?.invalidate();
+            return '已重置：状态、日程、关系卡与日记都清空了。';
+          },
+        },
+      ],
+    };
+  }
+
+  /** 记忆面板的服务端方法：只读为主，唯一写操作是撤销合并。 */
+  private async invokeMemoryPanel(panel: string, method: string, args: unknown[]): Promise<unknown> {
+    if (panel !== 'memory') throw new Error(`未知面板：${panel}`);
+    const list = Array.isArray(args) ? args : [];
+    const store = this.memoryStore;
+    if (method === 'overview') {
+      const stats = store.stats();
+      const records = store.entries();
+      return {
+        records: stats.records,
+        events: stats.events,
+        byKind: stats.byKind,
+        byScope: stats.byScope,
+        archived: records.filter((record) => record.archived).length,
+        merged: records.filter((record) => record.details?.merged === true).length,
+        musing: records.filter((record) => record.tags.includes('musing')).length,
+        rules: records.filter((record) => record.kind === 'rule' && !record.archived).length,
+        people: records.filter((record) => record.kind === 'person' && !record.archived).length,
+        threads: records.filter((record) => record.kind === 'thread' && !record.archived).length,
+        quarantine: store.listQuarantine().length,
+        lastConsolidateDay: this.state.lastConsolidateDay,
+        lastMergeDay: this.state.lastMergeDay,
+        lastReflectWeek: this.state.lastReflectWeek,
+        surfacedMemories: Object.keys(this.state.surfacedMemories ?? {}).length,
+        surfacedReviews: Object.keys(this.state.surfacedReviews ?? {}).length,
+        bytes: store.fileInfo().bytes,
+        error: store.error ? this.safeError(store.error) : null,
+        mood: Math.round(this.state.mood),
+        energy: Math.round(this.state.energy),
+        activity: this.state.activity,
+        sleeping: this.state.sleeping,
+        proactiveToday: this.countToday(),
+        proactiveCap: this.cfg().proactiveDailyCap,
+        musingToday: this.state.musingDay === localParts(new Date(), this.tz()).date ? this.state.musingCount : 0,
+        musingCap: Number.isFinite(this.cfg().musingDailyCap) ? this.cfg().musingDailyCap : 2,
+        nextProactiveDue: this.state.proactiveDueAt,
+        nextProactiveDueText: this.state.proactiveDueAt ? formatLocal(this.state.proactiveDueAt, this.tz()).slice(11, 16) : '',
+        mindLogLevel: this.cfg().mindLogLevel ?? 'summary',
+      };
+    }
+    if (method === 'search') {
+      const query = typeof list[0] === 'string' ? list[0].trim() : '';
+      if (!query) throw new Error('search 需要关键词');
+      const scope = typeof list[1] === 'string' ? list[1].trim() : '';
+      const limit = Math.min(20, Math.max(1, Number(list[2]) || 8));
+      const hits = store.search(query, {
+        limit,
+        scope: scope === '*' ? undefined : (scope || this.activeScope()),
+        includeArchived: false,
+        kinds: MEMORY_KINDS,
+      });
+      return {
+        hits: hits.map((hit) => ({
+          id: hit.id,
+          kind: hit.kind,
+          scope: hit.scope,
+          ts: hit.ts,
+          date: formatLocal(hit.ts, this.tz()).slice(0, 10),
+          score: hit.score,
+          snippet: hit.snippet,
+        })),
+      };
+    }
+    if (method === 'merges') {
+      const rows = store.entries()
+        .filter((record) => record.details?.merged === true)
+        .sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts))
+        .slice(0, 50)
+        .map((record) => ({
+          id: record.id,
+          text: record.text.slice(0, 220),
+          ts: record.ts,
+          date: formatLocal(record.ts, this.tz()).slice(0, 10),
+          scope: record.scope,
+          count: record.details?.mergedCount ?? 0,
+          from: record.details?.mergedFrom ?? [],
+        }));
+      return { merges: rows };
+    }
+    if (method === 'recent') {
+      const rows = store.entries()
+        .filter((record) => record.reviewStatus === 'approved' && !record.archived
+          && !record.tags.includes('legacy-chat') && !record.tags.includes('recap'))
+        .sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts))
+        .slice(0, 12)
+        .map((record) => ({
+          id: record.id,
+          kind: record.kind,
+          scope: record.scope,
+          ts: record.ts,
+          date: formatLocal(record.ts, this.tz()).slice(0, 10),
+          importance: record.importance,
+          text: record.text.slice(0, 160),
+          emotion: record.details?.userEmotion?.label
+            ?? record.details?.howIFelt?.slice(0, 12)
+            ?? (record.tags.includes('musing') ? '走神' : '平淡'),
+          musing: record.tags.includes('musing'),
+        }));
+      return { recent: rows };
+    }
+    if (method === 'mind') {
+      const limit = Math.min(200, Math.max(1, Number(list[0]) || 80));
+      const type = typeof list[1] === 'string' && list[1] ? list[1] : undefined;
+      return {
+        events: this.mindLog.tail(limit, type).map((event) => ({
+          ...event,
+          time: formatLocal(event.ts, this.tz()).slice(11, 19),
+        })),
+      };
+    }
+    if (method === 'unmerge') {
+      const id = typeof list[0] === 'string' ? list[0].trim() : '';
+      if (!id) throw new Error('unmerge 需要 id');
+      const found = store.entries().some((record) => record.id === id && record.details?.merged === true);
+      const restored = store.unmerge(id);
+      if (restored) {
+        this.snapshot?.invalidate();
+        this.mind('memory', `撤销合并，恢复 ${restored} 条原文`, { memoryId: id });
+      }
+      return { found, restored, overview: await this.invokeMemoryPanel('memory', 'overview', []) };
+    }
+    throw new Error(`未知方法：${method}`);
+  }
+
+  async start(host: WorldHost): Promise<void> {
+    this.host = host;
+    this.stopped = false;
+    ensureDir(this.dataDir);
+    host.log.info('[companion] 启动', { dataDir: this.dataDir, tz: this.tz() });
+    this.snapshot = new SnapshotPusher({
+      push: async (text) => {
+        const pushed = await this.push('companion.context', text, 'piggyback');
+        this.lastContextDelivered = pushed?.delivered === true;
+        // archive-only 也返回 cursor，避免隐藏世界里每 60s 重推同一条 context。
+        return pushed ? pushed.cursor : null;
+      },
+      withdraw: async (cursor) => {
+        try {
+          return (await host.withdrawPending?.(cursor)) === true;
+        } catch {
+          return false;
+        }
+      },
+    });
+    this.tickPromise = this.tick(true);
+    await this.tickPromise;
+    this.tickPromise = null;
+    this.save(true);
+    this.timer = setInterval(() => {
+      this.tickPromise = this.tick(false);
+      void this.tickPromise.finally(() => { this.tickPromise = null; });
+    }, TICK_MS);
+    this.timer.unref?.();
+  }
+
+  async stop(): Promise<void> {
+    this.stopped = true;
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+    if (this.tickPromise) await this.tickPromise;
+    await this.snapshot?.close();
+    this.snapshot = null;
+    this.save(true);
+    this.memoryStore.close();
+    this.host = null;
+  }
+
+  /** 一轮对话结束：记下“刚说过话”，把下一次主动往后推。 */
+  onTurnEnded(): void {
+    const now = new Date();
+    this.lastUserProbe = 0;
+    const lastUser = this.probeLastUser(now.getTime());
+    // musing/consolidate 这类内部 turn 不代表“刚聊完”，不能把主动开口一直往后推。
+    if (!lastUser || now.getTime() - lastUser > 10 * 60_000) return;
+    this.state.lastTalkAt = now.toISOString();
+    this.state.proactiveDueAt = nextDueAt(now, this.cfg(), now.getTime());
+    this.save(true);
+  }
+
+  // ---- 内部 ----
+
+  /** 心理活动：只记决策，不记基础设施；off 时完全跳过。 */
+  private mind(type: MindType, summary: string, refs?: Record<string, string | number>): void {
+    if (this.cfg().mindLogLevel === 'off') return;
+    this.mindLog.append({ type, summary, refs });
+  }
+
+  private async push(
+    type: string,
+    text: string,
+    trigger: 'piggyback' | 'flush',
+  ): Promise<{ cursor: number; delivered: boolean } | null> {
+    if (!this.host) return null;
+    try {
+      const env = await this.host.pushEvent({
+        type,
+        ts: new Date().toISOString(),
+        source: this.id,
+        origin: 'internal',
+        text,
+      }, { trigger });
+      const delivery = (env as { contextDelivery?: string }).contextDelivery;
+      return { cursor: env.cursor, delivered: !delivery || delivery === 'deliver' };
+    } catch (error) {
+      this.host.log.warn('[companion] 推送失败', String(error));
+      this.mind('error', `推送失败：${type}`, { event: type });
+      return null;
+    }
+  }
+
+  /** 只推进状态，不推送任何事件（前缀组装会调用它）。 */
+  private refreshState(): void {
+    const now = new Date();
+    advance(this.state, now, this.tz(), this.cfg());
+    // 精力/心情是连续量，changed 只看 tick 级差值会永远为 false；按 20s 节流照常落盘。
+    this.save(false);
+  }
+
+  private async tick(force: boolean): Promise<void> {
+    if (this.stopped && !force) return;
+    if (this.tickRunning) return;
+    this.tickRunning = true;
+    try {
+      this.refreshState();
+      this.captureIncoming();
+      if (this.cfg().memoryEnabled) this.memoryStore.maybePrune(this.cfg().memoryRetentionDays);
+      this.scheduleNightly(new Date(), localParts(new Date(), this.tz()));
+      const now = new Date();
+      await this.pushContext();
+      const woke = await this.maybeProactive(now);
+      if (!woke) await this.maybeMuse(now);
+    } catch (error) {
+      this.host?.log.warn('[companion] tick 失败', String(error));
+    } finally {
+      this.tickRunning = false;
+    }
+  }
+
+  private profileKey(): string {
+    return MAIN_KEY;
+  }
+
+  private currentProfile(): Profile | undefined {
+    return this.profiles[this.profileKey()];
+  }
+
+  private journalEntries(): JournalEntry[] {
+    const limit = Math.max(0, Number(this.cfg().journalInPrompt) || 0);
+    return limit > 0 ? readJournal(this.dataDir, limit) : [];
+  }
+
+  private async pushContext(force = false): Promise<void> {
+    if (!this.snapshot) return;
+    const memory = this.memoryDigest();
+    const input = {
+      state: this.state,
+      profile: this.currentProfile(),
+      profileKey: this.profileKey(),
+      journal: this.journalEntries(),
+      cfg: this.cfg(),
+      tz: this.tz(),
+      now: new Date(),
+      memory,
+    };
+    const pushed = await this.snapshot.maybePush(contextSignature(input), buildContextText(input), force);
+    if (pushed && this.lastContextDelivered && memory.echoId && memory.echoEventId) {
+      const at = new Date().toISOString();
+      const kept = Object.entries({ ...(this.state.surfacedMemories ?? {}), [memory.echoId]: at })
+        .filter(([, ts]) => Date.now() - Date.parse(ts) < 30 * 86_400_000)
+        .slice(-200);
+      this.state.surfacedMemories = Object.fromEntries(kept);
+      this.state.lastEchoEventKey = memory.echoEventId;
+      this.state.lastEchoText = memory.echo ?? '';
+      this.state.lastEchoId = memory.echoId;
+      this.memoryStore.markUsed([memory.echoId]);
+      this.mind('echo', memory.echo ?? '情绪回声', { memoryId: memory.echoId });
+      this.save(true);
+    }
+  }
+
+  private countToday(): number {
+    const p = localParts(new Date(), this.tz());
+    return this.state.proactiveDay === p.date ? this.state.proactiveCount : 0;
+  }
+
+  /** 最近一次外部事件（有人说话）的时间；30s 缓存，避免每拍都扫事件库。 */
+  private probeLastUser(now: number): number | null {
+    if (now - this.lastUserProbe < 30_000) return this.lastUserAt;
+    this.lastUserProbe = now;
+    try {
+      const events = this.host?.store?.range({ origin: 'external', limit: 50 }) ?? [];
+      let best = 0;
+      for (const e of events) {
+        if (!isHumanEvent(e as never)) continue;
+        const t = Date.parse(e.ts);
+        if (Number.isFinite(t) && t > best) best = t;
+      }
+      this.lastUserAt = best ? best : null;
+    } catch {
+      this.lastUserAt = null;
+    }
+    return this.lastUserAt;
+  }
+
+  /** proactive 的“记忆由头”：未完成的话头优先，其次近期高情绪 episode。 */
+  private memoryReason(now: Date): { text: string; evidence: string; threadId?: string; episodeId?: string } | null {
+    if (!this.cfg().memoryEnabled) return null;
+    for (const thread of this.memoryStore.openThreads(3)) {
+      const last = this.state.surfacedThreads?.[thread.id];
+      if (last && now.getTime() - Date.parse(last) < 7 * 86_400_000) continue;
+      const what = thread.details?.what ?? thread.text;
+      const quote = thread.details?.evidence?.[0] ?? thread.text;
+      return { text: `上次没说完的事：${what.slice(0, 80)}`, evidence: quote.slice(0, 80), threadId: thread.id };
+    }
+    const surfaced = this.state.surfacedMemories ?? {};
+    const episodes = this.memoryStore.highIntensityEpisodes(7, 3)
+      .filter((episode) => {
+        const last = surfaced[episode.id];
+        return !last || now.getTime() - Date.parse(last) >= 7 * 86_400_000;
+      });
+    if (episodes.length) {
+      const episode = episodes[0];
+      const quote = episode.details?.howIFelt ?? episode.text;
+      return { text: `忽然想起：${episode.text.slice(0, 80)}`, evidence: quote.slice(0, 80), episodeId: episode.id };
+    }
+    return null;
+  }
+
+  /** 夜间巩固/衰减/合并/周反思的调度（本地时间）。 */
+  private scheduleNightly(now: Date, p: LocalParts): void {
+    if (!this.cfg().memoryEnabled) return;
+    if (this.state.lastDecayDay !== p.date) {
+      this.state.lastDecayDay = p.date;
+      const archived = this.memoryStore.decaySweep();
+      if (archived) {
+        this.host?.log.info('[companion] 衰减归档', archived);
+        this.mind('memory', `衰减归档 ${archived} 条`);
+      }
+    }
+    const stats = this.memoryStore.stats();
+    if (stats.records === 0 && stats.events === 0) return;
+    if (p.hour === 3 && p.minute >= 30 && this.state.lastConsolidateDay !== p.date
+      && this.canAttempt(this.state.consolidateAttemptAt)) {
+      void this.runConsolidation(p).catch((error) => this.nightlyFailed('巩固', error));
+      return;
+    }
+    // 03:30 失败后 04:00–07:59 继续退避重试；真正错过则在 08:00 后补跑。
+    if (p.hour >= 4 && p.hour < 8 && this.state.lastConsolidateDay !== p.date
+      && this.state.consolidateAttemptAt && this.canAttempt(this.state.consolidateAttemptAt)) {
+      void this.runConsolidation(p).catch((error) => this.nightlyFailed('巩固', error));
+      return;
+    }
+    if (p.hour >= 8 && this.state.lastConsolidateDay !== p.date
+      && this.canAttempt(this.state.consolidateAttemptAt)) {
+      this.host?.log.info('[companion] 补跑夜间整理', { day: p.date });
+      void this.runConsolidation(p).catch((error) => this.nightlyFailed('巩固', error));
+      return;
+    }
+    // 周反思：周日 04:00 正常触发；失败后 04:00–07:59 重试，错过则在之后每天 08:00 补跑。
+    const week = this.weekKey(p.date);
+    if (p.weekday === '周日' && p.hour === 4 && this.state.lastReflectWeek !== week
+      && this.canAttempt(this.state.reflectAttemptAt)) {
+      void this.runReflection(week, p).catch((error) => this.nightlyFailed('周反思', error));
+      return;
+    }
+    const sunday = this.lastSundayKey(p);
+    if (p.hour >= 4 && p.hour < 8 && this.state.lastReflectWeek !== sunday
+      && this.state.reflectAttemptAt && this.canAttempt(this.state.reflectAttemptAt)) {
+      void this.runReflection(sunday, p).catch((error) => this.nightlyFailed('周反思', error));
+      return;
+    }
+    if (p.hour >= 8 && this.state.lastReflectWeek !== sunday && this.canAttempt(this.state.reflectAttemptAt)) {
+      this.host?.log.info('[companion] 补跑周反思', { week: sunday });
+      void this.runReflection(sunday, p).catch((error) => this.nightlyFailed('周反思', error));
+    }
+  }
+
+  /** 失败/archive-only 后退避 30 分钟，避免每个 tick 反复推。 */
+  private canAttempt(at: string | undefined): boolean {
+    if (!at) return true;
+    const t = Date.parse(at);
+    return !Number.isFinite(t) || Date.now() - t >= 30 * 60_000;
+  }
+
+  private weekKey(date: string): string {
+    const year = date.slice(0, 4);
+    const base = Date.parse(`${year}-01-01`);
+    const t = Date.parse(date);
+    return `${year}-${Math.ceil((Number.isFinite(t) && Number.isFinite(base) ? (t - base) / 604_800_000 : 0) + 1)}`;
+  }
+
+  /** 最近一个周日的周 key：周日当天就是今天，其余日期往回数。 */
+  private lastSundayKey(p: LocalParts): string {
+    const index = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'].indexOf(p.weekday);
+    const back = p.weekday === '周日' ? 0 : index + 1;
+    const [y, m, d] = p.date.split('-').map(Number);
+    const date = new Date(Date.UTC(y, (m || 1) - 1, (d || 1) - back)).toISOString().slice(0, 10);
+    return this.weekKey(date);
+  }
+
+  private async runConsolidation(p: LocalParts): Promise<void> {
+    if (this.state.consolidateTriesDay !== p.date) {
+      this.state.consolidateTriesDay = p.date;
+      this.state.consolidateTries = 0;
+    }
+    this.state.consolidateAttemptAt = new Date().toISOString();
+    this.state.consolidateTries += 1;
+    this.save(true);
+    if (this.state.consolidateTries > 4) {
+      this.state.lastConsolidateDay = p.date;
+      this.save(true);
+      this.mind('nightly', '今日巩固重试已达上限（4 次），明天再试', { day: p.date });
+      return;
+    }
+    if (this.cfg().mergeEnabled !== false && this.state.lastMergeDay !== p.date) {
+      this.state.lastMergeDay = p.date;
+      const threshold = Number.isFinite(this.cfg().mergeSimilarity) ? this.cfg().mergeSimilarity : 0.5;
+      const merged = this.memoryStore.mergeSimilarEpisodes(2, 3, threshold);
+      if (merged) {
+        this.host?.log.info('[companion] 合并相似经历', merged);
+        this.mind('memory', `合并 ${merged} 簇相似经历`);
+      }
+    }
+    const plan = this.consolidatePlanText();
+    const reviewIds = this.pendingReviewIds;
+    const pushed = await this.push('companion.consolidate', plan, 'flush');
+    if (!pushed?.delivered) {
+      this.host?.log.warn('[companion] 夜间整理未投递，30 分钟后重试', { day: p.date });
+      this.mind('nightly', '夜间整理未投递，稍后重试', { day: p.date });
+      return;
+    }
+    this.state.lastConsolidateDay = p.date;
+    this.state.consolidateTries = 0;
+    this.save(true);
+    this.mind('nightly', '夜间整理已投递', { day: p.date });
+    if (!reviewIds.length) return;
+    const now = new Date();
+    const kept = Object.entries({ ...(this.state.surfacedReviews ?? {}) })
+      .filter(([, ts]) => now.getTime() - Date.parse(ts) < 30 * 86_400_000)
+      .slice(-200);
+    for (const id of reviewIds) kept.push([id, now.toISOString()]);
+    this.state.surfacedReviews = Object.fromEntries(kept.slice(-200));
+    this.save(true);
+  }
+
+  private async runReflection(week: string, p: LocalParts): Promise<void> {
+    if (this.state.reflectTriesDay !== p.date) {
+      this.state.reflectTriesDay = p.date;
+      this.state.reflectTries = 0;
+    }
+    this.state.reflectAttemptAt = new Date().toISOString();
+    this.state.reflectTries += 1;
+    this.save(true);
+    if (this.state.reflectTries > 4) {
+      this.state.lastReflectWeek = week;
+      this.save(true);
+      this.mind('nightly', '今日周反思重试已达上限（4 次），下周再试', { week });
+      return;
+    }
+    const pushed = await this.push('companion.reflect',
+      '[周反思] 这一周快过去了。挑 1-3 件这周的事，用 companion_remember 写 1 条 self'
+      + '（details.topic/belief/evidenceRefs）；不要写流水账，也不要重复旧结论。', 'flush');
+    if (!pushed?.delivered) {
+      this.host?.log.warn('[companion] 周反思未投递，之后每天 08:00 重试', { week, day: p.date });
+      this.mind('nightly', '周反思未投递，稍后重试', { week });
+      return;
+    }
+    this.state.lastReflectWeek = week;
+    this.state.reflectTries = 0;
+    this.save(true);
+    this.mind('nightly', '周反思已投递', { week });
+  }
+
+  private safeError(text: string): string {
+    return String(text).replace(/[A-Za-z]:\[^\s，。]+/g, '…').slice(0, 120);
+  }
+
+  private nightlyFailed(stage: string, error: unknown): void {
+    this.host?.log.warn(`[companion] ${stage}失败`, String(error));
+    this.mind('error', `${stage}失败：${this.safeError(error instanceof Error ? error.message : String(error))}`);
+  }
+
+  private consolidatePlanText(): string {
+    const events = this.memoryStore.recentEvents(24, 30)
+      .map((event) => `- ${formatLocal(event.ts, this.tz()).slice(11, 16)} ${event.text.slice(0, 120)}`)
+      .join(NL);
+    const threads = this.memoryStore.openThreads(0).slice(0, 5)
+      .map((thread) => `- ${(thread.details?.what ?? thread.text).slice(0, 120)}`)
+      .join(NL);
+    const surfacedReviews = this.state.surfacedReviews ?? {};
+    const reviewRecords = this.memoryStore.fadingImportant(4)
+      .filter((record) => {
+        const last = surfacedReviews[record.id];
+        return !last || Date.now() - Date.parse(last) >= 7 * 86_400_000;
+      })
+      .slice(0, 2);
+    this.pendingReviewIds = reviewRecords.map((record) => record.id);
+    const review = reviewRecords
+      .map((record) => `- ${record.text.slice(0, 120)}（${record.kind}）`)
+      .join(NL);
+    return [
+      '【夜间整理】',
+      '过去 24 小时的人话：',
+      events || '（没有）',
+      '未完成的约定/话头：',
+      threads || '（没有）',
+      '快忘的重要记忆（可以自然复习/确认，也可以忽略）：',
+      review || '（没有）',
+      '请用 companion_consolidate action=apply 提交 0-6 条记录：episode（带 howIFelt/intensity/userEmotion）、fact、person 更新、thread（status/what/due）。',
+      '只写有依据的事；不要写工具回执；不要删任何东西；没有值得记的就提交空数组。',
+    ].join(NL);
+  }
+
+  private async toolConsolidate(args: Record<string, unknown>): Promise<string | ToolOutcome> {
+    if (!this.cfg().memoryEnabled) return '内置记忆已关闭（设置 → 我会永远陪着你 → 内置记忆）。';
+    const action = String(args.action ?? 'plan');
+    if (action === 'plan') return this.consolidatePlanText();
+    if (action !== 'apply') return this.fail('action 只有 plan / apply。');
+    const raw = Array.isArray(args.records) ? args.records : [];
+    if (!raw.length) return '没有提交记录；这次整理不写入。';
+    if (raw.length > 6) return this.fail('一次最多提交 6 条。');
+    const prepared: Array<{ kind: MemoryKind; text: string; details?: Record<string, unknown>; importance?: number }> = [];
+    for (const item of raw) {
+      if (!item || typeof item !== 'object') continue;
+      const record = item as Record<string, unknown>;
+      const kind = String(record.kind ?? 'episode') as MemoryKind;
+      if (!MEMORY_KINDS.includes(kind)) return this.fail(`未知 kind：${kind}`);
+      const text = trimText(record.text, 600);
+      if (!text) continue;
+      prepared.push({
+        kind,
+        text,
+        details: record.details && typeof record.details === 'object'
+          ? record.details as Record<string, unknown>
+          : undefined,
+        importance: typeof record.importance === 'number' ? record.importance : 0.6,
+      });
+    }
+    let added = 0;
+    for (const record of prepared) {
+      const result = this.memoryStore.add({
+        kind: record.kind,
+        text: record.text,
+        scope: this.activeScope(),
+        details: record.details as never,
+        importance: record.importance,
+        source: 'consolidate',
+      });
+      if (result.added) added += 1;
+    }
+    this.snapshot?.invalidate();
+    if (added) this.mind('memory', `夜间整理写入 ${added} 条`);
+    return `整理完成：提交 ${prepared.length} 条，新增 ${added} 条。`;
+  }
+
+  private async maybeProactive(now: Date): Promise<boolean> {
+    if (this.proactiveInFlight) return false;
+    this.proactiveInFlight = true;
+    try {
+      return await this.maybeProactiveInner(now);
+    } finally {
+      this.proactiveInFlight = false;
+    }
+  }
+
+  private async maybeProactiveInner(now: Date): Promise<boolean> {
+    const cfg = this.cfg();
+    if (!this.host || !cfg.proactiveEnabled) return false;
+    const p = localParts(now, this.tz());
+    if (this.state.proactiveDay !== p.date) {
+      this.state.proactiveDay = p.date;
+      this.state.proactiveCount = 0;
+      this.state.proactiveDueAt = null;
+    }
+    const lastUserAt = this.probeLastUser(now.getTime());
+    const gate = evaluate({
+      cfg,
+      state: this.state,
+      now,
+      tz: this.tz(),
+      lastUserAt,
+      countToday: this.state.proactiveCount,
+    });
+    if (!gate.ok) {
+      if (this.lastMindGate !== gate.code) {
+        this.lastMindGate = gate.code;
+        this.mind('proactive', `没开口：${gate.blockedBy}`, { code: gate.code });
+      }
+      // 被睡觉/免打扰拦住时，把下一次排到窗口结束后，免得醒来还在原地打转。
+      if (gate.code === 'sleep') {
+        const due = nextWindowEnd(now, this.tz(), cfg.sleepStart, cfg.sleepEnd);
+        if (due) this.state.proactiveDueAt = due.toISOString();
+      } else if (gate.code === 'quiet') {
+        const due = nextWindowEnd(now, this.tz(), cfg.quietStart, cfg.quietEnd);
+        if (due) this.state.proactiveDueAt = due.toISOString();
+      }
+      return false;
+    }
+    if (!this.state.proactiveDueAt) {
+      this.state.proactiveDueAt = nextDueAt(now, cfg, now.getTime());
+      return false;
+    }
+
+    const sinceTalkMs = lastUserAt ? now.getTime() - lastUserAt : null;
+    const memory = this.memoryReason(now);
+    const reason = memory
+      ? memory.text
+      : reasonFor({
+        state: this.state,
+        now,
+        tz: this.tz(),
+        sinceTalkMs,
+        seed: (now.getTime() / 60_000) | 0,
+      });
+    const text = buildProactiveText({
+      state: this.state,
+      reason,
+      now,
+      tz: this.tz(),
+      quiet: `${cfg.quietStart}-${cfg.quietEnd}`,
+      sinceTalk: sinceTalkMs === null ? '记不清了' : humanSpan(sinceTalkMs),
+    });
+    const withEvidence = memory ? `${text}${NL}记忆线索（只是素材，不一定说出来）：${memory.evidence}` : text;
+    const pushed = await this.push('companion.proactive', withEvidence, 'flush');
+    if (!pushed?.delivered) {
+      // archive-only / 未投递：不扣配额，但把下一次排到正常间隔后，避免每分钟重试。
+      this.state.proactiveDueAt = nextDueAt(now, cfg, now.getTime());
+      this.save(true);
+      return false;
+    }
+    this.lastMindGate = '';
+    this.mind('proactive', `开口：${reason}`, {
+      ...(memory?.threadId ? { threadId: memory.threadId } : {}),
+      ...(memory?.episodeId ? { memoryId: memory.episodeId } : {}),
+    });
+    if (memory?.threadId) {
+      this.state.surfacedThreads = { ...(this.state.surfacedThreads ?? {}), [memory.threadId]: now.toISOString() };
+    }
+    if (memory?.episodeId) {
+      this.state.surfacedMemories = { ...(this.state.surfacedMemories ?? {}), [memory.episodeId]: now.toISOString() };
+    }
+    this.state.proactiveCount += 1;
+    this.state.proactiveDay = p.date;
+    this.state.lastProactiveAt = now.toISOString();
+    this.state.lastProactiveReason = reason;
+    this.state.proactiveDueAt = nextDueAt(now, cfg, now.getTime());
+    this.save(true);
+    return true;
+  }
+
+  private stateSummary(): string {
+    const p = localParts(new Date(), this.tz());
+    const cur = currentItem(this.state.agenda, p.minutes);
+    const next = upcomingItem(this.state.agenda, p.minutes);
+    const bits = [
+      `现在 ${p.date} ${String(p.hour).padStart(2, '0')}:${String(p.minute).padStart(2, '0')} ${p.weekday}`,
+      `精力 ${Math.round(this.state.energy)}/100，心情${moodLabel(this.state.mood)}，在${this.state.location}，正在${this.state.activity}`,
+    ];
+    if (cur) bits.push(`当前日程：${agendaLine(cur)}`);
+    if (next) bits.push(`下一件：${agendaLine(next)}`);
+    return `${bits.join('；')}。`;
+  }
+
+  private async toolState(args: Record<string, unknown>): Promise<string> {
+    const action = String(args.action ?? 'get');
+    if (action === 'update') {
+      if (typeof args.energy === 'number') this.state.energy = clampNumber(args.energy, 0, 100);
+      if (typeof args.mood === 'number') this.state.mood = clampNumber(args.mood, 0, 100);
+      const activity = trimText(args.activity, 40);
+      const location = trimText(args.location, 40);
+      if (activity) this.state.activity = activity;
+      if (location) this.state.location = location;
+      this.state.updatedAt = new Date().toISOString();
+      this.save(true);
+      this.snapshot?.invalidate();
+      return `已更新。${this.stateSummary()}`;
+    }
+    return this.stateSummary();
+  }
+
+  private parseItems(raw: unknown): AgendaItem[] {
+    if (!Array.isArray(raw)) return [];
+    const out: AgendaItem[] = [];
+    for (const entry of raw.slice(0, 24)) {
+      if (!entry || typeof entry !== 'object') continue;
+      const item = entry as Record<string, unknown>;
+      const time = trimText(item.time, 5);
+      const title = trimText(item.title, 40);
+      if (!time || !title || hmToMinutes(time) === null) continue;
+      out.push({ time, title, place: trimText(item.place, 20) || '屏幕边' });
+    }
+    return out.sort((a, b) => (hmToMinutes(a.time) ?? 0) - (hmToMinutes(b.time) ?? 0));
+  }
+
+  private agendaReport(): string {
+    if (!this.state.agenda.length) return '今天还没有安排。';
+    const p = localParts(new Date(), this.tz());
+    const cur = currentItem(this.state.agenda, p.minutes);
+    return this.state.agenda
+      .map((i) => `${agendaLine(i)}${cur && cur.time === i.time ? ' ← 现在' : ''}`)
+      .join('\n');
+  }
+
+  private async toolAgenda(args: Record<string, unknown>): Promise<string> {
+    const action = String(args.action ?? 'get');
+    if (action === 'set') {
+      const items = this.parseItems(args.items);
+      if (!items.length) return '没有可用的日程项：每项至少要 time（HH:MM）和 title。';
+      this.state.agenda = items;
+      this.save(true);
+      this.snapshot?.invalidate();
+      return `今天改成这样了：\n${this.agendaReport()}`;
+    }
+    if (action === 'add') {
+      const items = this.parseItems(args.items);
+      if (!items.length) return '没加进去：需要 time（HH:MM）和 title。';
+      this.state.agenda = [...this.state.agenda, ...items].sort(
+        (a, b) => (hmToMinutes(a.time) ?? 0) - (hmToMinutes(b.time) ?? 0),
+      );
+      this.save(true);
+      this.snapshot?.invalidate();
+      return `加好了：\n${this.agendaReport()}`;
+    }
+    if (action === 'clear') {
+      this.state.agenda = [];
+      this.state.agendaClearedDay = localParts(new Date(), this.tz()).date;
+      this.save(true);
+      this.snapshot?.invalidate();
+      return '日程清空了，今天剩下的时间自己安排。';
+    }
+    return this.agendaReport();
+  }
+
+  private async toolProfile(args: Record<string, unknown>): Promise<string> {
+    const key = trimText(args.key, 40) || MAIN_KEY;
+    const action = String(args.action ?? 'get');
+    if (action === 'list') {
+      const keys = Object.keys(this.profiles);
+      if (!keys.length) return '还没有任何关系卡。';
+      return keys.map((k) => `${k}: ${[this.profiles[k].name, this.profiles[k].relation].filter(Boolean).join(' / ') || '（空）'}`).join('\n');
+    }
+    const current = this.profiles[key] ?? { name: '', relation: '', birthday: '', notes: [], updatedAt: '' };
+    if (action === 'set') {
+      const next: Profile = {
+        name: trimText(args.name, 30) || current.name,
+        relation: trimText(args.relation, 30) || current.relation,
+        birthday: trimText(args.birthday, 10) || current.birthday,
+        notes: current.notes,
+        updatedAt: new Date().toISOString(),
+      };
+      if (Array.isArray(args.notes)) {
+        const merged = new Set(current.notes);
+        for (const n of args.notes.slice(0, 20)) {
+          const text = trimText(n, 80);
+          if (text) merged.add(text);
+        }
+        next.notes = [...merged].slice(0, 30);
+      }
+      this.profiles[key] = next;
+      this.save(true);
+      this.snapshot?.invalidate();
+      return `关系卡已更新：${[next.name && `称呼 ${next.name}`, next.relation && `关系 ${next.relation}`,
+        next.birthday && `生日 ${next.birthday}`, next.notes.length && `备注 ${next.notes.length} 条`]
+        .filter(Boolean).join('，') || '（还是空的）'}。`;
+    }
+    const bits = [current.name && `称呼 ${current.name}`, current.relation && `关系 ${current.relation}`,
+      current.birthday && `生日 ${current.birthday}`].filter(Boolean);
+    const notes = current.notes.length ? `\n备注：${current.notes.map((n) => `- ${n}`).join('\n')}` : '';
+    return `${key}：${bits.length ? bits.join('，') : '还没有资料'}${notes}`;
+  }
+
+  private async toolJournal(args: Record<string, unknown>): Promise<string> {
+    const action = String(args.action ?? 'read');
+    if (action === 'write') {
+      const text = trimText(args.text, 400);
+      if (!text) return '写日记需要 text。';
+      const kind = trimText(args.kind, 10) || '日记';
+      appendJournal(this.dataDir, { ts: new Date().toISOString(), kind, text });
+      this.snapshot?.invalidate();
+      return `记下了（${kind}，${text.length} 字）。`;
+    }
+    const limit = Math.min(20, Math.max(1, Number(args.limit) || 3));
+    const rows = readJournal(this.dataDir, limit);
+    if (!rows.length) return '还没有日记。';
+    return rows.map((r) => `${formatLocal(r.ts, this.tz())} [${r.kind}] ${r.text}`).join('\n');
+  }
+
+
+  private async toolRecall(args: Record<string, unknown>): Promise<string> {
+    if (!this.cfg().memoryEnabled) return '内置记忆已关闭（设置 → 我会永远陪着你 → 内置记忆）。';
+    const query = trimText(args.query, 80);
+    if (!query) return '要查什么？给一个关键词。';
+    const limit = Math.min(10, Math.max(1, Number(args.limit) || 5));
+    const scopeArg = trimText(args.scope, 40);
+    const hits = this.memoryStore.search(query, {
+      limit,
+      // 默认只查当前会话，避免群聊/私聊串域；scope:"*" 才查全库。
+      scope: scopeArg === '*' ? undefined : (scopeArg || this.activeScope()),
+      retentionDays: this.cfg().memoryRetentionDays,
+      includeArchived: args.includeArchived === true,
+      kinds: MEMORY_KINDS,
+    });
+    if (!hits.length) return `记忆里没找到「${query}」。可以换个说法，或者直接问对方。`;
+    this.memoryStore.markUsed(hits.flatMap((hit) => (hit.id ? [hit.id] : [])));
+    this.mind('memory', `检索「${query}」命中 ${hits.length} 条`, { query });
+    const label: Record<string, string> = {
+      episode: '经历', fact: '事实', person: '人物', thread: '约定', self: '自我', rule: '规则',
+    };
+    return hits
+      .map((hit) => `[${label[hit.kind] ?? hit.kind}/${hit.scope}] ${hit.ts.slice(0, 10)} ${hit.snippet}`)
+      .join('\n');
+  }
+
+  private async toolRemember(args: Record<string, unknown>): Promise<string> {
+    if (!this.cfg().memoryEnabled) return '内置记忆已关闭（设置 → 我会永远陪着你 → 内置记忆）。';
+    const text = trimText(args.text, 600);
+    if (!text) return '要记什么？text 不能为空。';
+    const kind = String(args.kind ?? 'fact') as MemoryKind;
+    if (!MEMORY_KINDS.includes(kind)) {
+      return this.fail(`kind 只能是 ${MEMORY_KINDS.join(' / ')}；没有 note/profile/relationship 这些旧写法。`);
+    }
+    const tags = Array.isArray(args.tags) ? args.tags.map((t) => trimText(t, 20)).filter(Boolean) : [];
+    const musing = tags.includes('musing');
+    const details = args.details && typeof args.details === 'object'
+      ? { ...(args.details as Record<string, unknown>) }
+      : {};
+    if (args.userEmotion && typeof args.userEmotion === 'object') {
+      details.userEmotion = args.userEmotion;
+    }
+    const result = this.memoryStore.add({
+      kind,
+      text,
+      scope: trimText(args.scope, 40) || this.activeScope(),
+      confidence: typeof args.confidence === 'number' ? args.confidence : 0.75,
+      importance: typeof args.importance === 'number'
+        ? args.importance
+        : (musing ? 0.25 : 0.55),
+      source: musing ? 'muse' : 'tool',
+      tags,
+      details: details as never,
+    });
+    if (!result.added) return `这条已经记过了（${kind}，id ${result.id.slice(0, 8)}），没有重复写入。`;
+    this.snapshot?.invalidate();
+    this.mind('memory', `${musing ? '胡思乱想' : '记住'} ${kind}：${text.slice(0, 40)}`, {
+      memoryId: result.id,
+      kind,
+    });
+    return `记下了（${kind}）。`;
+  }
+
+  private fail(text: string): ToolOutcome {
+    return { text, failed: true };
+  }
+
+  private async toolMemory(args: Record<string, unknown>): Promise<string | ToolOutcome> {
+    const action = String(args.action ?? 'stats');
+    if (!this.cfg().memoryEnabled && action !== 'stats') return '内置记忆已关闭。';
+    if (action === 'stats') {
+      const stats = this.memoryStore.stats();
+      const kinds = Object.entries(stats.byKind).map(([k, n]) => `${k} ${n}`).join(' · ') || '空';
+      const error = stats.error ? ` · ⚠ ${stats.error}` : '';
+      return `记录 ${stats.records} 条（${kinds}）· 原始事件 ${stats.events} 条 · `
+        + `文件 ${(this.memoryStore.fileInfo().bytes / 1024).toFixed(0)} KB${error}`;
+    }
+    if (action === 'export') {
+      const version = (() => {
+        try {
+          return String((JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version?: string }).version ?? '0.0.0');
+        } catch {
+          return '0.0.0';
+        }
+      })();
+      const scopes = Array.isArray(args.scopes)
+        ? args.scopes.map((s) => trimText(s, 64)).filter(Boolean)
+        : undefined;
+      const bundle = this.memoryStore.exportBundle(
+        { system: 'cortico-world-private-companion', version },
+        { scopes, includeRules: args.includeRules === true, includeArchived: args.includeArchived === true },
+      );
+      const dir = join(this.dataDir, 'exports');
+      ensureDir(dir);
+      const name = `companion-memory-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+      writeFileSync(join(dir, name), JSON.stringify(bundle, null, 2), 'utf8');
+      return `已导出 ${bundle.records.length} 条到 data/private-companion/exports/${name}`;
+    }
+    if (action === 'import') {
+      const raw = trimText(args.path, 200);
+      if (!raw) return this.fail('import 需要 path：把 bundle 放进 data/private-companion/imports/ 后填文件名。');
+      if (/[\\/]/.test(raw) || !/^[A-Za-z0-9._-]+\.json$/.test(raw)) {
+        return this.fail('只接受 imports/ 目录下的 .json 文件名（不要带路径）。');
+      }
+      const dir = join(this.dataDir, 'imports');
+      const target = join(dir, raw);
+      if (!existsSync(target)) return this.fail('imports/ 里没有这个文件。');
+      let size = 0;
+      try {
+        size = statSync(target).size;
+      } catch {
+        return this.fail('读不了 imports/ 里的文件。');
+      }
+      if (size > 8 * 1024 * 1024) return this.fail('文件超过 8MB，拒绝导入。');
+      let bundle: unknown;
+      try {
+        bundle = JSON.parse(readFileSync(target, 'utf8'));
+      } catch {
+        return this.fail('这个文件不是合法 JSON。');
+      }
+      const records = (bundle as { records?: unknown[] })?.records;
+      if (!Array.isArray(records)) return this.fail('不是 companion-memory bundle（缺 records 数组）。');
+      if (String(args.mode ?? 'merge') === 'dry') {
+        const schema = (bundle as { schema?: unknown })?.schema;
+        return `dry-run：schema=${String(schema)}，文件里 ${records.length} 条；当前库 ${this.memoryStore.stats().records} 条。`;
+      }
+      const staged = this.memoryStore.stageImport(bundle);
+      if (staged.error) return this.fail(`导入失败：${staged.error}`);
+      return `已放进隔离区：${staged.staged} 条（无效 ${staged.invalid}），bundleId=${staged.bundleId}。`
+        + ' 需要人工用 CLI 批准后才会进入记忆。';
+    }
+    if (action === 'quarantine') {
+      const list = this.memoryStore.listQuarantine();
+      if (!list.length) return '隔离区是空的。';
+      return list.map((item) => `${item.bundleId} · ${item.records} 条 · ${item.stagedAt}`).join('\n');
+    }
+    if (action === 'prune') {
+      const removed = this.memoryStore.prune(this.cfg().memoryRetentionDays);
+      return removed ? `已裁剪 ${removed} 条过期原始事件。` : '没有需要裁剪的原始事件。';
+    }
+    if (action === 'unmerge') {
+      const id = trimText(args.id, 128);
+      if (!id) return this.fail('unmerge 需要 id（合并摘要的记录 id）。');
+      const restored = this.memoryStore.unmerge(id);
+      if (restored) this.mind('memory', `撤销合并，恢复 ${restored} 条原文`, { memoryId: id });
+      return restored ? `已撤销合并，恢复 ${restored} 条原文。` : '没有找到这条合并摘要，或没有可恢复的原文。';
+    }
+    if (action === 'forget') {
+      const query = trimText(args.query, 200);
+      if (!query) return 'forget 需要 query（要删的原文）。';
+      const removed = this.memoryStore.remove(query, trimText(args.scope, 40) || this.activeScope());
+      return removed ? `删掉了 ${removed} 条。` : '没找到完全匹配的一条；为避免误删，forget 只删原文完全相同的记录。';
+    }
+    return '未知 action（stats/export/import/prune/forget）。';
+  }
+
+  private activeScope(): string {
+    return this.memoryStore.lastHumanEvent(120)?.scope ?? MAIN_KEY;
+  }
+
+  /** 进上下文的记忆摘要：规则 + 人物 + 今天 + 情绪回声 + 最近几条。 */
+  private memoryDigest(): {
+    rules: string[]; person?: string; working?: string; echo?: string;
+    echoId?: string; echoEventId?: string; recent: string[];
+  } {
+    if (!this.cfg().memoryEnabled) return { rules: [], recent: [] };
+    const cfg = this.cfg();
+    const scope = this.activeScope();
+    const rules = this.memoryStore.rules(cfg.memoryNotesInPrompt);
+    const person = this.memoryStore.people()[0];
+    const workingRecords = cfg.workingMemoryInPrompt !== false ? this.memoryStore.todayEpisodes(3, scope) : [];
+    const workingIds = new Set(workingRecords.map((record) => record.id));
+    const working = cfg.workingMemoryInPrompt !== false
+      ? (workingRecords.length
+        ? workingRecords.map((record) => record.text.slice(0, 60)).join('；')
+        : this.memoryStore.todayDigest(3, scope))
+      : '';
+    const recent = this.memoryStore.recent(6, scope)
+      .filter((record) => !workingIds.has(record.id))
+      .slice(0, 3);
+    this.memoryStore.markUsed(recent.map((record) => record.id));
+    const echo = cfg.emotionEchoEnabled !== false ? this.emotionEcho(scope) : null;
+    return {
+      // 规则是硬约束，不截断；单条超过 400 字才做保护性截断。
+      rules: rules.map((record) => (record.text.length > 400 ? `${record.text.slice(0, 400)}…` : record.text)),
+      person: person ? `他：${person.text.slice(0, 180)}` : undefined,
+      working: working || undefined,
+      echo: echo?.text,
+      echoId: echo?.id,
+      echoEventId: echo?.eventId,
+      recent: recent.map((record) => record.text.slice(0, 120)),
+    };
+  }
+
+  /** 情绪回声：只看最近 30 分钟最后一条人话，同一事件只算一次；标记在推送成功后做。 */
+  private emotionEcho(scope: string): { text: string; id: string; eventId: string } | null {
+    const event = this.memoryStore.lastHumanEvent(30);
+    if (!event) return null;
+    if (this.state.lastEchoEventKey === event.id) {
+      return this.state.lastEchoText && this.state.lastEchoId
+        ? { text: this.state.lastEchoText, id: this.state.lastEchoId, eventId: event.id }
+        : null;
+    }
+    const signal = detectEmotion(event.text);
+    if (!signal) return null;
+    const surfaced = this.state.surfacedMemories ?? {};
+    const exclude = new Set(Object.entries(surfaced)
+      .filter(([, ts]) => Date.now() - Date.parse(ts) < 7 * 86_400_000)
+      .map(([id]) => id));
+    let past: MemoryRecord | undefined = this.memoryStore.emotionEcho(signal.label, event.scope, { exclude })[0];
+    if (!past) {
+      const words = relatedWords(signal.label);
+      past = this.memoryStore.entries()
+        .filter((record) => record.kind === 'episode' && record.reviewStatus === 'approved'
+          && !record.archived && scopeKey(record.scope) === scopeKey(event.scope) && !exclude.has(record.id)
+          && !record.tags.includes('legacy-chat') && !record.tags.includes('recap')
+          && !record.tags.includes('musing')
+          && Date.now() - Date.parse(record.ts) >= 86_400_000
+          && words.some((word) => record.text.includes(word)))
+        .sort((a, b) => (b.details?.intensity ?? 0) - (a.details?.intensity ?? 0))[0];
+    }
+    if (!past) return null;
+    const cause = past.details?.userEmotion?.cause
+      ?? past.details?.userEmotion?.label
+      ?? past.text.slice(0, 60).replace(/\s+/g, ' ');
+    const when = past.ts.slice(5, 10);
+    return {
+      id: past.id,
+      eventId: event.id,
+      text: `他这次说「${signal.matched}」；上次（${when}）是因为「${cause.slice(0, 60)}」。可以自然问一句，也可以不提。`,
+    };
+  }
+
+  /** 空闲胡思乱想：每天有限次数，写低权重 episode（tag musing），不主动发消息。 */
+  private async maybeMuse(now: Date): Promise<void> {
+    const cfg = this.cfg();
+    const enabled = cfg.musingEnabled !== false;
+    const cap = Number.isFinite(cfg.musingDailyCap) ? cfg.musingDailyCap : 2;
+    const idleNeed = Number.isFinite(cfg.musingIdleHours) ? cfg.musingIdleHours : 4;
+    if (!this.host || !enabled || !cfg.memoryEnabled || cap <= 0) return;
+    const p = localParts(now, this.tz());
+    if (this.state.musingDay !== p.date) {
+      this.state.musingDay = p.date;
+      this.state.musingCount = 0;
+    }
+    if (this.state.musingCount >= cap) return;
+    if (p.hour < 8 || p.hour >= 23) return;
+    if (this.state.sleeping || inWindow(p.minutes, cfg.quietStart, cfg.quietEnd)) return;
+    const lastUserAt = this.probeLastUser(now.getTime());
+    if (!lastUserAt) return;
+    const idleHours = (now.getTime() - lastUserAt) / 3_600_000;
+    if (idleHours < idleNeed) return;
+    if (this.state.lastMusingAt && now.getTime() - Date.parse(this.state.lastMusingAt) < idleNeed * 3_600_000) return;
+    const seeds = this.musingSeeds();
+    const pushed = await this.push('companion.muse', [
+      '【胡思乱想】',
+      `他已经 ${Math.round(idleHours)} 小时没说话了，你一个人待着。`,
+      '可以随便想起 1-2 件没头没尾的事，用 companion_remember kind=episode tags=["musing"] importance=0.25 记下。',
+      '不要发消息，不要写工具回执，不要总结成日记；想不起来就不写。',
+      '素材：',
+      ...seeds,
+    ].join(NL), 'flush');
+    if (!pushed?.delivered) {
+      // 未投递不扣次数，但按 idleNeed 退避，避免每分钟重试。
+      this.state.lastMusingAt = now.toISOString();
+      this.save(true);
+      return;
+    }
+    this.state.musingCount += 1;
+    this.state.lastMusingAt = now.toISOString();
+    this.save(true);
+  }
+
+  private musingSeeds(): string[] {
+    const seeds: string[] = [];
+    const person = this.memoryStore.people()[0];
+    if (person) seeds.push(`- 他：${person.text.slice(0, 100)}`);
+    const thread = this.memoryStore.openThreads(1)[0];
+    if (thread) seeds.push(`- 没做完的事：${(thread.details?.what ?? thread.text).slice(0, 100)}`);
+    for (const record of this.memoryStore.recent(2, this.activeScope())) seeds.push(`- 最近：${record.text.slice(0, 100)}`);
+    return seeds.slice(0, 4);
+  }
+
+  /** 把新的外部事件追加进原始事件层；只记人说的话，不记各世界自己的遥测。 */
+  private captureIncoming(): void {
+    if (!this.host || !this.cfg().memoryEnabled || !this.cfg().memoryCapture) return;
+    const latest = this.host.store.latestCursor();
+    if (latest < this.memoryStore.eventCursor) {
+      // 宿主事件库回退（清库/恢复备份）：游标跟着回退，否则捕获永久停摆。
+      this.memoryStore.resetCursor(latest);
+      return;
+    }
+    const from = this.memoryStore.eventCursor + 1;
+    if (latest < from) return;
+    // 落后时不跳段：每拍最多追 200 条，慢慢补齐。
+    const upTo = Math.min(latest, from + 199);
+    const batch: Array<{ text: string; ts: string; source: string; scope: string; cursor: number }> = [];
+    for (let c = from; c <= upTo; c += 1) {
+      const event = this.host.store.get(c);
+      if (!event || !isHumanEvent(event)) continue;
+      batch.push({
+        text: event.text,
+        ts: event.ts,
+        source: event.source,
+        scope: scopeOfEvent(event),
+        cursor: c,
+      });
+    }
+    this.memoryStore.appendEvents(batch);
+    this.memoryStore.eventCursor = upTo;
+    if (batch.length) this.lastUserProbe = 0;
+  }
+
+
+
+  private async toolProactive(args: Record<string, unknown>): Promise<string> {
+    const action = String(args.action ?? 'status');
+    const now = new Date();
+    if (action === 'trigger') {
+      const lastUserAt = this.probeLastUser(now.getTime());
+      const since = lastUserAt ? now.getTime() - lastUserAt : null;
+      const reason = reasonFor({
+        state: this.state, now, tz: this.tz(), sinceTalkMs: since, seed: now.getTime(),
+      });
+      const text = buildProactiveText({
+        state: this.state,
+        reason,
+        now,
+        tz: this.tz(),
+        quiet: `${this.cfg().quietStart}-${this.cfg().quietEnd}`,
+        sinceTalk: since === null ? '记不清了' : humanSpan(since),
+      });
+      const pushed = await this.push('companion.proactive', text, 'flush');
+      if (!pushed?.delivered) return '推送失败：World 未连接或当前不可投递。';
+      this.mind('proactive', `手动触发：${reason}`);
+      this.state.proactiveCount += 1;
+      this.state.proactiveDay = localParts(now, this.tz()).date;
+      this.state.lastProactiveAt = now.toISOString();
+      this.state.lastProactiveReason = reason;
+      this.state.proactiveDueAt = nextDueAt(now, this.cfg(), now.getTime());
+      this.save(true);
+      return `已按当前状态开口一次（由头：${reason}）。`;
+    }
+    const gate = evaluate({
+      cfg: this.cfg(),
+      state: this.state,
+      now,
+      tz: this.tz(),
+      lastUserAt: this.probeLastUser(now.getTime()),
+      countToday: this.countToday(),
+    });
+    const due = dueHm(this.state.proactiveDueAt, this.tz());
+    return [
+      `主动联系：${this.cfg().proactiveEnabled ? '开' : '关'}`,
+      `下一次：${due}`,
+      `今天已主动：${this.countToday()} 次（上限 ${this.cfg().proactiveDailyCap || '不限'}）`,
+      `上一次由头：${this.state.lastProactiveReason ?? '无'}`,
+      gate.ok ? '现在可以开口。' : `现在不会开口：${gate.blockedBy}。`,
+    ].join('\n');
+  }
+
+  /** 供排障用的只读快照（不进模型）。 */
+  debugSnapshot(): Record<string, unknown> {
+    const p = localParts(new Date(), this.tz());
+    return {
+      state: this.state,
+      sleeping: isSleeping(p, this.cfg()),
+      quiet: inWindow(p.minutes, this.cfg().quietStart, this.cfg().quietEnd),
+      countToday: this.countToday(),
+      agenda: this.state.agenda,
+      profiles: Object.keys(this.profiles),
+      memory: this.memoryStore.stats(),
+      files: {
+        state: existsSync(join(this.dataDir, STATE_FILE)),
+        journal: existsSync(journalPath(this.dataDir)),
+      },
+      envPrompt: readFileSync(ENV_PROMPT_FILE, 'utf8').length,
+      generatedAt: new Date().toISOString(),
+    };
+  }
+}

@@ -1,0 +1,66 @@
+{
+  "name": "cortico-world-private-companion",
+  "version": "0.4.0",
+  "type": "module",
+  "description": "「我会永远陪着你」Coopanion 版：把 menglimi 的 AstrBot 插件 astrbot_plugin_private_companion 的生活感、主动联系、关系卡与说话分寸，独立实现为 Coopanion 的 World 扩展；内置可迁移记忆（companion-memory/2，导入导出 + 隔离审核）。",
+  "keywords": [
+    "cortico-world",
+    "cortico",
+    "coopanion",
+    "companion",
+    "persona",
+    "proactive",
+    "memory",
+    "portable-memory",
+    "memory-import"
+  ],
+  "author": "yaya-super",
+  "license": "MIT",
+  "homepage": "https://github.com/YaYa-super/cortico-world-private-companion",
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "./src/index.ts",
+  "cortico": {
+    "kind": "world",
+    "api": 6,
+    "displayName": "我会永远陪着你",
+    "icon": "assets/icon.png",
+    "describe": "describe.json",
+    "webUiClient": "src/webui/client.js",
+    "tags": [
+      "companion",
+      "persona",
+      "proactive",
+      "life",
+      "memory",
+      "import-export",
+      "migration"
+    ]
+  },
+  "files": [
+    "src",
+    "assets",
+    "describe.json",
+    "ENV_PROMPT.md",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "test": "node --test",
+    "describe": "node tools/gen-describe.mjs",
+    "smoke": "node tools/smoke.ts",
+    "prepublishOnly": "node tools/gen-describe.mjs && node --test"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YaYa-super/cortico-world-private-companion.git"
+  },
+  "bugs": {
+    "url": "https://github.com/YaYa-super/cortico-world-private-companion/issues"
+  }
+}

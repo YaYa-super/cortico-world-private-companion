@@ -1,0 +1,9 @@
+node_modules/
+*.tgz
+*.log
+.runtime/
+data/
+backups/
+preview/
+.env
+.venv/
