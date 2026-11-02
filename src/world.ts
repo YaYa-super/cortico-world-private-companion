@@ -624,10 +624,25 @@ export class CompanionWorld implements World {
     }
     for (const thread of this.memoryStore.openThreads(3)) {
       const due = Date.parse(thread.details?.due ?? '');
+      const what = (thread.details?.what ?? thread.text).slice(0, 70);
       if (Number.isFinite(due) && due <= now.getTime()) {
-        const what = (thread.details?.what ?? thread.text).slice(0, 70);
         push(`thread-due:${thread.id}`, `上次说好的事到期了：${what}`, 'memory', 0.9, thread.id);
+      } else if (Number.isFinite(due) && due - now.getTime() <= 24 * 3_600_000) {
+        push(`thread-soon:${thread.id}`, `约好的事快到了：${what}`, 'memory', 0.8, thread.id);
       }
+    }
+    const todayMonthDay = p.date.slice(5);
+    const year = Number(p.date.slice(0, 4));
+    const anniversaries = this.memoryStore.entries()
+      .filter((record) => record.kind === 'episode' && !record.archived
+        && record.importance >= 0.6
+        && !record.tags.includes('legacy-chat') && !record.tags.includes('recap')
+        && formatLocal(record.ts, this.tz()).slice(5, 10) === todayMonthDay
+        && Number(formatLocal(record.ts, this.tz()).slice(0, 4)) < year)
+      .sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts))
+      .slice(0, 2);
+    for (const record of anniversaries) {
+      push(`anniversary:${record.id}:${p.date}`, `去年的今天：${record.text.slice(0, 60)}`, 'memory', 0.85, undefined);
     }
     const lastUser = this.probeLastUser(now.getTime());
     if (lastUser !== null && now.getTime() - lastUser > 6 * 3_600_000
