@@ -629,6 +629,28 @@ export class CompanionWorld implements World {
         push(`thread-due:${thread.id}`, `上次说好的事到期了：${what}`, 'memory', 0.9, thread.id);
       }
     }
+    const lastUser = this.probeLastUser(now.getTime());
+    if (lastUser !== null && now.getTime() - lastUser > 6 * 3_600_000
+      && p.hour >= 9 && p.hour < 22) {
+      push('social:long-silence', '他好像很久没出声了，有点想他。', 'social', 0.55);
+    }
+    const birthday = (this.currentProfile()?.birthday ?? '').trim();
+    const monthDay = birthday.slice(-5);
+    if (monthDay && monthDay === p.date.slice(5)) {
+      const name = this.currentProfile()?.name || '他';
+      push(`birthday:${p.date}`, `今天是${name}的生日。`, 'social', 0.95);
+    }
+    const mealTitle = cur?.title ?? '';
+    if (!/饭|吃|餐/.test(mealTitle)
+      && ((p.hour === 11 && p.minute >= 30) || (p.hour === 12 && p.minute < 30))) {
+      push(`meal:lunch:${p.date}`, '到午饭点了，想问问吃了没有。', 'body', 0.55);
+    } else if (!/饭|吃|餐/.test(mealTitle)
+      && ((p.hour === 17 && p.minute >= 30) || (p.hour === 18 && p.minute < 30))) {
+      push(`meal:dinner:${p.date}`, '到晚饭点了，先看看有什么。', 'body', 0.55);
+    }
+    if (p.hour === 21) {
+      push(`time:evening:${p.date}`, '天黑了，想在睡之前跟他说句话。', 'social', 0.6);
+    }
 
     if (!out.length) return;
     out.sort((a, b) => b.salience - a.salience);
