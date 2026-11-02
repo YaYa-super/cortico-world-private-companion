@@ -377,8 +377,15 @@ export class CompanionWorld implements World {
     if (method === 'mind') {
       const limit = Math.min(200, Math.max(1, Number(list[0]) || 80));
       const type = typeof list[1] === 'string' && list[1] ? list[1] : undefined;
+      // 兼容 0.4.0 把“没开口”也记成 proactive 的旧日志：按 summary 归到 gate 筛选。
+      const events = type === 'gate'
+        ? [...this.mindLog.tail(limit, 'gate'), ...this.mindLog.tail(limit, 'proactive')
+          .filter((event) => event.summary.startsWith('没开口：'))]
+          .sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts))
+          .slice(0, limit)
+        : this.mindLog.tail(limit, type);
       return {
-        events: this.mindLog.tail(limit, type).map((event) => ({
+        events: events.map((event) => ({
           ...event,
           time: formatLocal(event.ts, this.tz()).slice(11, 19),
         })),
