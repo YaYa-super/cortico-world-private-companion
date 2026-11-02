@@ -1,9 +1,9 @@
 /**
  * 主动认知的第一层：便宜的“背景念头”。
  *
- * 这里刻意不调用模型：每 5–10 分钟用状态/记忆/日程做一次评估，产生一个念头和
- * 一个动作建议（silent/journal/rest/contact）。默认只记日志，不改行为；用来观察
- * “她自己的念头”是否成立，再决定要不要接更贵的 deliberation。
+ * 这里刻意不调用模型：每 5–10 分钟用状态/记忆/日程做一次评估，产生一个念头、
+ * 动作建议，再决定要不要形成意图。默认只记日志，不改行为；act 模式只执行
+ * journal/rest，contact 只形成意图但不自动发消息。
  */
 
 export type ThoughtAction = 'silent' | 'journal' | 'rest' | 'contact';
@@ -17,8 +17,10 @@ export interface ThoughtInput {
   lastUserAt: number | null;
   journalToday: boolean;
   threads: Array<{ id: string; text: string; what?: string }>;
-  episode?: { id: string; text: string };
+  episodes?: Array<{ id: string; text: string }>;
+  memories?: Array<{ id: string; text: string }>;
   currentAgenda?: string;
+  nextAgenda?: string;
 }
 
 export interface Thought {
@@ -27,6 +29,19 @@ export interface Thought {
   salience: number;
   action: ThoughtAction;
   source: string;
+  refs?: Record<string, string | number>;
+}
+
+export interface Intention {
+  id: string;
+  key: string;
+  text: string;
+  action: ThoughtAction;
+  source: string;
+  salience: number;
+  createdAt: string;
+  dueAt: string;
+  status: 'pending' | 'done' | 'held' | 'expired';
   refs?: Record<string, string | number>;
 }
 
@@ -49,8 +64,7 @@ export function think(input: ThoughtInput, avoidKeys: string[] = []): Thought | 
     });
   }
 
-  const thread = input.threads[0];
-  if (thread) {
+  for (const thread of input.threads.slice(0, 2)) {
     const what = (thread.what ?? thread.text).slice(0, 60);
     push({
       key: `thread:${thread.id}`,
@@ -73,14 +87,43 @@ export function think(input: ThoughtInput, avoidKeys: string[] = []): Thought | 
     });
   }
 
-  if (input.episode && input.episode.text) {
+  for (const episode of (input.episodes ?? []).slice(0, 2)) {
     push({
-      key: `recall:${input.episode.id}`,
-      text: `忽然想起：${input.episode.text.slice(0, 50)}`,
+      key: `recall:${episode.id}`,
+      text: `忽然想起：${episode.text.slice(0, 50)}`,
       salience: 0.5,
       action: 'silent',
       source: 'memory',
-      refs: { memoryId: input.episode.id },
+      refs: { memoryId: episode.id },
+    });
+  }
+
+  for (const memory of (input.memories ?? []).slice(0, 3)) {
+    push({
+      key: `memory:${memory.id}`,
+      text: `脑子里冒出一句：${memory.text.slice(0, 50)}`,
+      salience: 0.36,
+      action: 'silent',
+      source: 'memory',
+      refs: { memoryId: memory.id },
+    });
+  }
+
+  if (input.mood < 40) {
+    push({
+      key: 'mood:low',
+      text: '心里有点闷，说不清为什么。',
+      salience: 0.5,
+      action: 'silent',
+      source: 'body',
+    });
+  } else if (input.mood > 75) {
+    push({
+      key: 'mood:high',
+      text: '今天心情不错，想把这种感觉记住。',
+      salience: 0.4,
+      action: 'journal',
+      source: 'body',
     });
   }
 
@@ -96,9 +139,18 @@ export function think(input: ThoughtInput, avoidKeys: string[] = []): Thought | 
 
   if (input.currentAgenda) {
     push({
-      key: `agenda:${input.currentAgenda}`,
+      key: `agenda-now:${input.currentAgenda}`,
       text: `现在该${input.currentAgenda.slice(0, 40)}了。`,
       salience: 0.35,
+      action: 'silent',
+      source: 'agenda',
+    });
+  }
+  if (input.nextAgenda) {
+    push({
+      key: `agenda-next:${input.nextAgenda}`,
+      text: `待会儿要${input.nextAgenda.slice(0, 40)}。`,
+      salience: 0.3,
       action: 'silent',
       source: 'agenda',
     });
@@ -108,4 +160,23 @@ export function think(input: ThoughtInput, avoidKeys: string[] = []): Thought | 
   out.sort((a, b) => b.salience - a.salience);
   // 最近已经想过的念头先放一放；全都想过就宁可安静，也不复读。
   return out.find((thought) => !avoidKeys.includes(thought.key)) ?? null;
+}
+
+/** 把念头变成有到期时间的意图；silent 不形成意图。 */
+export function makeIntention(thought: Thought, now: Date): Intention {
+  const delay = thought.action === 'contact' ? 30 * 60_000
+    : thought.action === 'journal' ? 5 * 60_000
+      : 60_000;
+  return {
+    id: `intent-${now.getTime()}-${Math.random().toString(36).slice(2, 7)}`,
+    key: thought.key,
+    text: thought.text,
+    action: thought.action,
+    source: thought.source,
+    salience: thought.salience,
+    createdAt: now.toISOString(),
+    dueAt: new Date(now.getTime() + delay).toISOString(),
+    status: 'pending',
+    ...(thought.refs ? { refs: thought.refs } : {}),
+  };
 }

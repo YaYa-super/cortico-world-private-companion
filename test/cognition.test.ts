@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { think } from '../src/cognition.ts';
+import { makeIntention, think } from '../src/cognition.ts';
 
 const base = {
   now: new Date('2026-11-02T20:00:00+08:00'),
@@ -36,6 +36,15 @@ test('背景念头：刚想过的话头不会复读', () => {
   const input = { ...base, threads: [{ id: 't1', text: '插件还没做完', what: '插件还没做完' }] };
   assert.equal(think(input)?.action, 'contact');
   assert.equal(think(input, ['thread:t1']), null);
+});
+
+test('念头会变成有到期时间的意图', () => {
+  const thought = think({ ...base, threads: [{ id: 't1', text: '插件还没做完', what: '插件还没做完' }] });
+  assert.ok(thought);
+  const intention = makeIntention(thought, base.now);
+  assert.equal(intention.action, 'contact');
+  assert.equal(intention.status, 'pending');
+  assert.equal(Date.parse(intention.dueAt) - base.now.getTime(), 30 * 60_000);
 });
 
 test('背景念头：没有明显念头时返回 null', () => {

@@ -5,6 +5,7 @@
  * 演化只依赖时间差，所以进程关掉再回来，状态会按真实逝去时间补算。
  */
 import type { CompanionConfig } from './config.ts';
+import type { Intention } from './cognition.ts';
 import { hmToMinutes, inWindow, localParts, minutesToHm, type LocalParts } from './time.ts';
 
 export interface AgendaItem {
@@ -57,6 +58,8 @@ export interface CompanionState {
   lastThoughtKey: string;
   /** 最近想过/记录过的念头：key → 时间（用于冷却，避免复读）。 */
   thoughtSeen: Record<string, string>;
+  /** 尚未落地的意图；只保留最近一小段。 */
+  intentions: Intention[];
   /** 上次结算时间（ISO）。 */
   updatedAt: string;
   /** 下一次允许主动开口的时刻（ISO）；null 表示还没排。 */
@@ -195,6 +198,7 @@ export function createInitialState(now: Date, tz: string, cfg: CompanionConfig):
     lastCognitionAt: '',
     lastThoughtKey: '',
     thoughtSeen: {},
+    intentions: [],
     updatedAt: now.toISOString(),
     proactiveDueAt: null,
     proactiveCount: 0,

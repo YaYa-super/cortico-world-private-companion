@@ -22,7 +22,7 @@ import { TOOL_SPECS } from './tools.ts';
 import { evaluate, reasonFor } from './proactive.ts';
 import { SnapshotPusher } from './snapshot.ts';
 import { detectEmotion, relatedWords } from './emotion.ts';
-import { think, type Thought } from './cognition.ts';
+import { makeIntention, think, type Thought } from './cognition.ts';
 import { MindLog, type MindType } from './mind.ts';
 import { MEMORY_KINDS, MemoryStore, scopeKey, type MemoryKind, type MemoryRecord } from './memory-store.ts';
 import { isHumanEvent, scopeOfEvent } from './event-filter.ts';
@@ -514,6 +514,7 @@ export class CompanionWorld implements World {
       const woke = await this.maybeProactive(now);
       if (!woke) await this.maybeMuse(now);
       this.scheduleCognition(now);
+      this.processIntentions(now);
     } catch (error) {
       this.host?.log.warn('[companion] tick 失败', String(error));
     } finally {
@@ -576,12 +577,17 @@ export class CompanionWorld implements World {
     if (this.state.sleeping) return;
 
     const p = localParts(now, this.tz());
-    const threads = this.memoryStore.openThreads(0).slice(0, 1)
+    const threads = this.memoryStore.openThreads(0).slice(0, 2)
       .map((thread) => ({ id: thread.id, text: thread.text, what: thread.details?.what }));
-    const episode = this.memoryStore.highIntensityEpisodes(7, 1)[0];
+    const episodes = this.memoryStore.highIntensityEpisodes(7, 2)
+      .map((episode) => ({ id: episode.id, text: episode.text }));
+    const memories = this.memoryStore.recent(5, this.activeScope())
+      .filter((record) => record.kind === 'episode')
+      .map((record) => ({ id: record.id, text: record.text }));
     const journalToday = readJournal(this.dataDir, 200)
       .some((entry) => entry.ts.slice(0, 10) === p.date);
     const cur = currentItem(this.state.agenda, p.minutes);
+    const next = upcomingItem(this.state.agenda, p.minutes);
     const seen = this.state.thoughtSeen ?? {};
     const cutoff = now.getTime() - 6 * 3_600_000;
     const recentKeys = Object.entries(seen)
@@ -596,8 +602,10 @@ export class CompanionWorld implements World {
       lastUserAt: this.probeLastUser(now.getTime()),
       journalToday,
       threads,
-      ...(episode ? { episode: { id: episode.id, text: episode.text } } : {}),
+      episodes,
+      memories,
       ...(cur ? { currentAgenda: cur.title } : {}),
+      ...(next ? { nextAgenda: next.title } : {}),
     }, recentKeys);
     if (!thought) return;
     this.state.lastThoughtKey = thought.key;
@@ -611,28 +619,76 @@ export class CompanionWorld implements World {
       source: thought.source,
       ...thought.refs,
     });
-    if (mode === 'act') this.actOnThought(thought, p);
+    if (mode === 'act' && thought.action !== 'silent' && thought.salience >= 0.4) {
+      const intentions = this.state.intentions ?? [];
+      if (!intentions.some((intention) => intention.key === thought.key && intention.status === 'pending')) {
+        const intention = makeIntention(thought, now);
+        this.state.intentions = [...intentions, intention].slice(-20);
+        this.mind('intention', `想${thought.action === 'contact' ? '找他' : thought.action === 'journal' ? '写下来' : '去休息'}：${thought.text}`, {
+          intentionId: intention.id,
+          dueAt: intention.dueAt,
+          action: intention.action,
+          salience: intention.salience,
+        });
+      }
+    }
     this.save(true);
   }
 
-  /** 只做自己世界内、可逆的动作；contact 先不自动执行，避免绕过主动闸门。 */
-  private actOnThought(thought: Thought, p: LocalParts): void {
-    if (thought.action === 'journal') {
-      const hasJournal = readJournal(this.dataDir, 500)
-        .some((entry) => entry.ts.slice(0, 10) === p.date);
-      if (!hasJournal) {
-        appendJournal(this.dataDir, {
-          ts: new Date().toISOString(),
-          kind: 'thought',
-          text: `【自己想的】${thought.text}`,
+  /** 处理到期的意图；contact 只 hold，不自动发消息。 */
+  private processIntentions(now: Date): void {
+    if (this.cfg().cognitionMode !== 'act') return;
+    const intentions = this.state.intentions ?? [];
+    if (!intentions.length) return;
+    const p = localParts(now, this.tz());
+    let changed = false;
+    for (const intention of intentions) {
+      if (intention.status !== 'pending') continue;
+      const due = Date.parse(intention.dueAt);
+      if (!Number.isFinite(due) || due > now.getTime()) continue;
+      if (intention.action === 'journal') {
+        const hasJournal = readJournal(this.dataDir, 500)
+          .some((entry) => entry.ts.slice(0, 10) === p.date);
+        if (!hasJournal) {
+          appendJournal(this.dataDir, {
+            ts: now.toISOString(),
+            kind: 'thought',
+            text: `【自己想的】${intention.text}`,
+          });
+          this.mind('action', '按意图写了一笔日记', { intentionId: intention.id });
+        } else {
+          this.mind('action', '想写日记，但今天已经写过了', { intentionId: intention.id });
+        }
+        intention.status = 'done';
+        changed = true;
+      } else if (intention.action === 'rest') {
+        this.state.activity = '打盹';
+        this.state.location = '床';
+        this.snapshot?.invalidate();
+        this.mind('action', '按意图去休息了', { intentionId: intention.id });
+        intention.status = 'done';
+        changed = true;
+      } else if (intention.action === 'contact') {
+        this.mind('intention', `想找他，但先放在心里：${intention.text.slice(0, 60)}`, {
+          intentionId: intention.id,
+          action: 'held',
         });
-        this.mind('memory', '按念头写了一笔日记');
+        intention.status = 'held';
+        changed = true;
       }
-    } else if (thought.action === 'rest' && thought.salience >= 0.7) {
-      this.state.activity = '打盹';
-      this.state.location = '床';
-      this.snapshot?.invalidate();
-      this.mind('memory', '按念头去休息了');
+    }
+    if (intentions.some((intention) => intention.status === 'pending'
+      && now.getTime() - Date.parse(intention.createdAt) > 12 * 3_600_000)) {
+      for (const intention of intentions) {
+        if (intention.status === 'pending' && now.getTime() - Date.parse(intention.createdAt) > 12 * 3_600_000) {
+          intention.status = 'expired';
+        }
+      }
+      changed = true;
+    }
+    if (changed) {
+      this.state.intentions = intentions.slice(-20);
+      this.save(true);
     }
   }
 
