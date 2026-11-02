@@ -8,6 +8,15 @@ import type { CompanionConfig } from './config.ts';
 import type { Intention } from './cognition.ts';
 import { hmToMinutes, inWindow, localParts, minutesToHm, type LocalParts } from './time.ts';
 
+export interface PendingTrigger {
+  key: string;
+  reason: string;
+  source: string;
+  salience: number;
+  at: string;
+  threadId?: string;
+}
+
 export interface AgendaItem {
   /** HH:MM */
   time: string;
@@ -75,6 +84,13 @@ export interface CompanionState {
   updatedAt: string;
   /** 实验性/主动休息：在此之前不按日程覆盖 activity/location。 */
   restUntil: string;
+  /** 事件/状态触发：等待正常主动路径消费；null 表示没有。 */
+  pendingTrigger: PendingTrigger | null;
+  /** 已触发过的 key → 时间，做每来源冷却。 */
+  triggerSeen: Record<string, string>;
+  /** 上一拍的日程 key / 睡眠状态，用于检测“刚开始/刚醒”。 */
+  lastAgendaKey: string;
+  lastSleeping: boolean;
   /** 下一次允许主动开口的时刻（ISO）；null 表示还没排。 */
   proactiveDueAt: string | null;
   proactiveCount: number;
@@ -222,6 +238,10 @@ export function createInitialState(now: Date, tz: string, cfg: CompanionConfig):
     followupReviewAt: '',
     updatedAt: now.toISOString(),
     restUntil: '',
+    pendingTrigger: null,
+    triggerSeen: {},
+    lastAgendaKey: '',
+    lastSleeping: false,
     proactiveDueAt: null,
     proactiveCount: 0,
     proactiveDay: p.date,

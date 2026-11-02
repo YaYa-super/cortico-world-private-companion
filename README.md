@@ -5,7 +5,7 @@
 > 把 AstrBot 插件 [`astrbot_plugin_private_companion`](https://github.com/menglimi/astrbot_plugin_private_companion)（中文名同样是「我会永远陪着你」）里
 > **“有自己的生活、会在合适的时候主动开口”** 这套机制，独立实现成 Coopanion 的 World 扩展。
 
-npm：`cortico-world-private-companion` · 当前 `0.4.1`（已发布）。首次升级请先备份 `records.json`/`.bak`/`state.json`。
+npm：`cortico-world-private-companion` · 当前 `0.4.1`（已发布）；`0.4.2` 已实现、待发布（候选触发，去掉主动计时器）。首次升级请先备份 `records.json`/`.bak`/`state.json`。
 
 ## 致谢与来源
 
@@ -70,8 +70,6 @@ node "D:\Coopanion\resources\app\node_modules\pnpm\bin\pnpm.cjs" install --no-fr
 | --- | --- | --- |
 | `enabled` | false | 世界开关（必须为 true 才挂载） |
 | `proactiveEnabled` | true | 主动联系总开关 |
-| `proactiveMinGapMin` | 90 | 两次主动的最小间隔 |
-| `proactiveJitterMin` | 12 | 在最小间隔上加的随机抖动，避免每天准点 |
 | `proactiveDailyCap` | 4 | 每日上限；0 = 不限 |
 | `idleGateMin` | 15 | 对方刚说完话的静默窗口 |
 | `quietStart` / `quietEnd` | 23:00 / 08:30 | 免打扰时段（支持跨零点） |
@@ -115,6 +113,7 @@ node "D:\Coopanion\resources\app\node_modules\pnpm\bin\pnpm.cjs" install --no-fr
 除了实验性的「念头 → 意图」，日常 proactive 本身已经带 P0/P1 策略：
 
 - **候选评分**：由头/记忆证据先打分，低于阈值只记 `candidate/review`，不开口；
+- **候选触发**：日程节点、醒来、低精力/低心情、话头到期等事件/状态变化产生候选；**不再用 90 分钟 + 抖动计时器**；
 - **未回应降速**：联系后 3 小时无回复，累计未回应；连续 2 次未回应不再联系；
 - **发送前复核**：当前日程繁忙、和上次太像、连续未回应时暂缓；
 - **审计**：心理活动里能看到 `候选/复核/主动/行动`；
@@ -145,7 +144,7 @@ World 页新增「记忆」面板（`src/webui/client.js`）：
 ## 开发
 
 ```bash
-node --test            # 69 个用例：时区/状态/主动/记忆库（损坏恢复、去重、检索、隔离区、导出 scope、裁剪、事件过滤、情绪/复习/合并/musing）
+node --test            # 71 个用例：时区/状态/主动/记忆库（损坏恢复、去重、检索、隔离区、导出 scope、裁剪、事件过滤、情绪/复习/合并/musing）
 node tools/import-memory-extra.mjs --dry   # 预览从旧记忆库能导多少
 node tools/eval-memory.mjs                 # 32 问记忆评测：recall@3 / 纯度 / p95
 node tools/eval-persona.mjs                # 6 问人格卡评测（CONSTITUTION）

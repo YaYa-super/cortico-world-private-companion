@@ -7,9 +7,9 @@ export interface CompanionConfig {
   enabled: boolean;
   /** 主动联系总开关。 */
   proactiveEnabled: boolean;
-  /** 两次主动之间的最小间隔（分钟）。 */
+  /** @deprecated 旧计时器参数，保留兼容，不再使用。 */
   proactiveMinGapMin: number;
-  /** 在最小间隔上再加的随机抖动上限（分钟），避免每天准点开口。 */
+  /** @deprecated 旧计时器参数，保留兼容，不再使用。 */
   proactiveJitterMin: number;
   /** 每天主动上限（0 = 不限制，不建议）。 */
   proactiveDailyCap: number;
@@ -125,23 +125,6 @@ export const COMPANION_CONFIG_GROUP: CompanionConfigGroup = {
         type: 'boolean',
         title: '主动联系',
         description: '开启后，它会按自己的生活和时间找你说一句；关掉后只回应，不主动开口。',
-        'x-hot': true,
-      },
-      'worlds.companion.proactiveMinGapMin': {
-        type: 'integer',
-        title: '两次主动的最小间隔（分钟）',
-        minimum: 5,
-        maximum: 720,
-        'x-suffix': '分钟',
-        'x-hot': true,
-      },
-      'worlds.companion.proactiveJitterMin': {
-        type: 'integer',
-        title: '最小间隔之上再加的随机抖动（分钟）',
-        description: '0 = 准点；默认 12，让开口时间不像定时器。',
-        minimum: 0,
-        maximum: 60,
-        'x-suffix': '分钟',
         'x-hot': true,
       },
       'worlds.companion.proactiveDailyCap': {

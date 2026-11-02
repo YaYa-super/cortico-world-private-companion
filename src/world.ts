@@ -14,8 +14,8 @@ import type {
 import type { WorldContext } from 'cortico/world.ts';
 import { COMPANION_CONFIG_GROUP, type CompanionConfig } from './config.ts';
 import {
-  advance, agendaLine, createInitialState, currentItem, dueHm, generateAgenda, isSleeping, moodLabel,
-  nextDueAt, upcomingItem, type AgendaItem, type CompanionState,
+  advance, agendaLine, createInitialState, currentItem, generateAgenda, isSleeping, moodLabel,
+  upcomingItem, type AgendaItem, type CompanionState, type PendingTrigger,
 } from './state.ts';
 import { buildContextText, buildProactiveText, contextSignature } from './context.ts';
 import { TOOL_SPECS } from './tools.ts';
@@ -204,7 +204,7 @@ export class CompanionWorld implements World {
         {
           label: '主动联系',
           state: cfg.proactiveEnabled ? 'online' : 'offline',
-          hint: cfg.proactiveEnabled ? `下一次约 ${dueHm(state.proactiveDueAt, this.tz())}` : '已关闭',
+          hint: cfg.proactiveEnabled ? '等待生活/状态触发' : '已关闭',
         },
         {
           label: '生活',
@@ -313,7 +313,7 @@ export class CompanionWorld implements World {
         musingToday: this.state.musingDay === localParts(new Date(), this.tz()).date ? this.state.musingCount : 0,
         musingCap: Number.isFinite(this.cfg().musingDailyCap) ? this.cfg().musingDailyCap : 2,
         nextProactiveDue: this.state.proactiveDueAt,
-        nextProactiveDueText: this.state.proactiveDueAt ? formatLocal(this.state.proactiveDueAt, this.tz()).slice(11, 16) : '',
+        nextProactiveDueText: '等待触发',
         cognitionMode: this.cfg().cognitionMode,
         cognitionIntervalMin: this.cfg().cognitionIntervalMin,
         cognitionContactMode: this.cfg().cognitionContactMode ?? 'hold',
@@ -464,7 +464,7 @@ export class CompanionWorld implements World {
     // musing/consolidate 这类内部 turn 不代表“刚聊完”，不能把主动开口一直往后推。
     if (!lastUser || now.getTime() - lastUser > 10 * 60_000) return;
     this.state.lastTalkAt = now.toISOString();
-    this.state.proactiveDueAt = nextDueAt(now, this.cfg(), now.getTime());
+    this.state.proactiveDueAt = null;
     this.save(true);
   }
 
@@ -519,6 +519,7 @@ export class CompanionWorld implements World {
       const now = new Date();
       // 先处理用户回复/未回应，再生成上下文，follow-up 才能赶上这一轮。
       this.refreshCognitionFeedback(now);
+      this.scheduleProactiveTriggers(now);
       await this.pushContext();
       const woke = await this.maybeProactive(now);
       if (!woke) await this.maybeMuse(now);
@@ -571,6 +572,80 @@ export class CompanionWorld implements World {
       this.mind('echo', memory.echo ?? '情绪回声', { memoryId: memory.echoId });
       this.save(true);
     }
+  }
+
+  /**
+   * 事件/状态触发：主动不再靠计时器，由生活/身体/话头变化驱动。
+   * 由正常 proactive 的候选评分/复核决定说不说。
+   */
+  private scheduleProactiveTriggers(now: Date): void {
+    const cfg = this.cfg();
+    if (!cfg.proactiveEnabled) return;
+    const p = localParts(now, this.tz());
+    const cur = currentItem(this.state.agenda, p.minutes);
+    const agendaKey = cur ? `${cur.time}:${cur.title}` : '';
+    const prevAgenda = this.state.lastAgendaKey;
+    const prevSleeping = this.state.lastSleeping;
+    // 先推进基线，即使有 pending trigger 也不能漏掉这一拍的日程/睡眠变化。
+    this.state.lastAgendaKey = agendaKey;
+    this.state.lastSleeping = this.state.sleeping;
+    const pending = this.state.pendingTrigger;
+    if (pending) {
+      const at = Date.parse(pending.at);
+      if (!Number.isFinite(at) || now.getTime() - at > 2 * 3_600_000) {
+        this.state.pendingTrigger = null;
+      } else {
+        return;
+      }
+    }
+    const seen = this.state.triggerSeen ?? {};
+    const canUse = (key: string) => {
+      const at = Date.parse(seen[key] ?? '');
+      return !Number.isFinite(at) || now.getTime() - at > 6 * 3_600_000;
+    };
+    const out: PendingTrigger[] = [];
+    const push = (key: string, reason: string, source: string, salience: number, threadId?: string) => {
+      if (!canUse(key)) return;
+      out.push({ key, reason, source, salience, at: now.toISOString(), ...(threadId ? { threadId } : {}) });
+    };
+
+    if (agendaKey && prevAgenda && agendaKey !== prevAgenda && cur) {
+      const meal = /早|午|晚|饭/.test(cur.title);
+      push(`agenda:${agendaKey}`, `现在该${cur.title}了。`, 'agenda', meal ? 0.65 : 0.45);
+    }
+    if (prevSleeping && !this.state.sleeping) {
+      push('wake', '刚醒过来，还有点没缓过来。', 'body', 0.7);
+    }
+    if (this.state.energy < 25) {
+      push('body:low-energy', '有点撑不住了，想缩一会儿。', 'body', 0.8);
+    }
+    if (this.state.mood < 35) {
+      push('body:low-mood', '心里有点闷。', 'body', 0.68);
+    }
+    for (const thread of this.memoryStore.openThreads(3)) {
+      const due = Date.parse(thread.details?.due ?? '');
+      if (Number.isFinite(due) && due <= now.getTime()) {
+        const what = (thread.details?.what ?? thread.text).slice(0, 70);
+        push(`thread-due:${thread.id}`, `上次说好的事到期了：${what}`, 'memory', 0.9, thread.id);
+      }
+    }
+
+    if (!out.length) return;
+    out.sort((a, b) => b.salience - a.salience);
+    const chosen = out[0];
+    this.state.pendingTrigger = chosen;
+    this.state.triggerSeen = Object.fromEntries(
+      Object.entries({ ...seen, [chosen.key]: now.toISOString() })
+        .filter(([, ts]) => Date.parse(ts) > now.getTime() - 7 * 86_400_000)
+        .slice(-100),
+    );
+    this.state.proactiveDueAt = null;
+    this.mind('trigger', `触发：${chosen.reason}`, {
+      trigger: chosen.key,
+      source: chosen.source,
+      salience: chosen.salience,
+    });
+    this.save(true);
   }
 
   /** 背景念头：便宜的评估，不调用模型；shadow 只记，act 允许写日记/休息。 */
@@ -804,6 +879,7 @@ export class CompanionWorld implements World {
 这是你自己想到的，可以自然地说一句，也可以不说。`;
     const pushed = await this.push('companion.proactive', text, 'flush');
     if (!pushed?.delivered) return { ok: false, reason: '未投递，稍后再说' };
+    this.state.pendingTrigger = null;
     this.state.proactiveCount += 1;
     this.state.proactiveDay = p.date;
     this.state.lastProactiveAt = now.toISOString();
@@ -811,7 +887,7 @@ export class CompanionWorld implements World {
     this.state.lastCognitionContactAt = now.toISOString();
     this.state.lastCognitionContactText = intention.text;
     this.state.cognitionAwaitingReply = true;
-    this.state.proactiveDueAt = nextDueAt(now, cfg, now.getTime());
+    this.state.proactiveDueAt = null;
     if (intention.refs?.threadId) {
       this.state.pendingFollowupThreadId = String(intention.refs.threadId);
       this.state.pendingFollowupAt = now.toISOString();
@@ -1116,10 +1192,21 @@ export class CompanionWorld implements World {
       this.state.proactiveCount = 0;
       this.state.proactiveDueAt = null;
     }
+    // 不再用计时器：只有事件/状态触发才进入主动路径。
+    const trigger = this.state.pendingTrigger;
+    if (!trigger) return false;
+    const at = Date.parse(trigger.at);
+    if (!Number.isFinite(at) || now.getTime() - at > 2 * 3_600_000) {
+      this.state.pendingTrigger = null;
+      this.state.proactiveDueAt = null;
+      this.save(true);
+      return false;
+    }
     const lastUserAt = this.probeLastUser(now.getTime());
+    // 触发不受旧计时器 dueAt 影响；仍保留睡眠/免打扰/额度/刚聊完这些闸门。
     const gate = evaluate({
       cfg,
-      state: this.state,
+      state: { ...this.state, proactiveDueAt: null },
       now,
       tz: this.tz(),
       lastUserAt,
@@ -1130,32 +1217,10 @@ export class CompanionWorld implements World {
         this.lastMindGate = gate.code;
         this.mind('gate', `没开口：${gate.blockedBy}`, { code: gate.code });
       }
-      // 被睡觉/免打扰拦住时，把下一次排到窗口结束后，免得醒来还在原地打转。
-      if (gate.code === 'sleep') {
-        const due = nextWindowEnd(now, this.tz(), cfg.sleepStart, cfg.sleepEnd);
-        if (due) this.state.proactiveDueAt = due.toISOString();
-      } else if (gate.code === 'quiet') {
-        const due = nextWindowEnd(now, this.tz(), cfg.quietStart, cfg.quietEnd);
-        if (due) this.state.proactiveDueAt = due.toISOString();
-      }
       return false;
     }
-    if (!this.state.proactiveDueAt) {
-      this.state.proactiveDueAt = nextDueAt(now, cfg, now.getTime());
-      return false;
-    }
-
     const sinceTalkMs = lastUserAt ? now.getTime() - lastUserAt : null;
-    const memory = this.memoryReason(now);
-    const reason = memory
-      ? memory.text
-      : reasonFor({
-        state: this.state,
-        now,
-        tz: this.tz(),
-        sinceTalkMs,
-        seed: (now.getTime() / 60_000) | 0,
-      });
+    const reason = trigger.reason;
     const text = buildProactiveText({
       state: this.state,
       reason,
@@ -1164,15 +1229,14 @@ export class CompanionWorld implements World {
       quiet: `${cfg.quietStart}-${cfg.quietEnd}`,
       sinceTalk: sinceTalkMs === null ? '记不清了' : humanSpan(sinceTalkMs),
     });
-    // P0：候选评分 / 繁忙闸门 / 未回应降速 / 发送前重复复核。
     const cur = currentItem(this.state.agenda, p.minutes);
     const busy = /开会|上课|工作|忙|面试|考试/.test(cur?.title ?? '');
     const candidate = {
-      key: memory ? `memory:${memory.threadId ?? memory.episodeId ?? 'reason'}` : 'state:reason',
+      key: trigger.key,
       text: reason,
-      salience: memory ? 0.9 : 0.6,
+      salience: trigger.salience,
       action: 'contact' as const,
-      source: memory ? 'memory' : 'agenda',
+      source: trigger.source,
     };
     const score = scoreThought(candidate, { busy });
     this.mind('candidate', `${score >= 0.55 ? '保留' : '暂缓'}：${reason}`, {
@@ -1181,64 +1245,62 @@ export class CompanionWorld implements World {
       source: candidate.source,
       ...(busy ? { gate: 'busy' } : {}),
     });
+    const clear = () => {
+      this.state.pendingTrigger = null;
+      this.state.proactiveDueAt = null;
+    };
     if (busy) {
       this.mind('review', '当前日程繁忙，暂缓联系', { score, gate: 'busy' });
-      this.state.proactiveDueAt = nextDueAt(now, cfg, now.getTime());
+      clear();
       this.save(true);
       return false;
     }
     if ((this.state.cognitionUnanswered ?? 0) >= 2) {
       this.mind('review', '连续未回应，主动降速', { score, unanswered: this.state.cognitionUnanswered });
-      this.state.proactiveDueAt = nextDueAt(now, cfg, now.getTime());
+      clear();
       this.save(true);
       return false;
     }
     if (this.state.lastCognitionContactText
       && textSimilarity(this.state.lastCognitionContactText, reason) >= 0.7) {
       this.mind('review', '和上次主动太像，暂缓', { score });
-      this.state.proactiveDueAt = nextDueAt(now, cfg, now.getTime());
+      clear();
       this.save(true);
       return false;
     }
     if (score < 0.55) {
       this.mind('review', `候选价值不足（${score}），先不联系`, { score });
-      this.state.proactiveDueAt = nextDueAt(now, cfg, now.getTime());
+      clear();
       this.save(true);
       return false;
     }
-    // P1：低精力时优先做自己的事（休息），而不是硬聊。
-    if (this.state.energy < 20 && !memory) {
+    // 低精力/身体触发优先做自己的事，而不是硬聊。
+    if (trigger.key === 'body:low-energy') {
       this.state.activity = '打盹';
       this.state.location = '床';
       this.state.restUntil = new Date(now.getTime() + 30 * 60_000).toISOString();
-      this.state.proactiveDueAt = nextDueAt(now, cfg, now.getTime());
       this.mind('action', '精力太低，先去休息而不是找人', { score, action: 'rest' });
       this.snapshot?.invalidate();
+      clear();
       this.save(true);
       return true;
     }
 
-    const withEvidence = memory ? `${text}${NL}记忆线索（只是素材，不一定说出来）：${memory.evidence}` : text;
-    const pushed = await this.push('companion.proactive', withEvidence, 'flush');
+    const pushed = await this.push('companion.proactive', text, 'flush');
     if (!pushed?.delivered) {
-      // archive-only / 未投递：不扣配额，但把下一次排到正常间隔后，避免每分钟重试。
-      this.state.proactiveDueAt = nextDueAt(now, cfg, now.getTime());
+      clear();
       this.save(true);
       return false;
     }
     this.lastMindGate = '';
     this.mind('proactive', `开口：${reason}`, {
-      ...(memory?.threadId ? { threadId: memory.threadId } : {}),
-      ...(memory?.episodeId ? { memoryId: memory.episodeId } : {}),
+      ...(trigger.threadId ? { threadId: trigger.threadId } : {}),
     });
-    this.mind('action', '按主动候选开口', { score, action: 'contact' });
-    if (memory?.threadId) {
-      this.state.surfacedThreads = { ...(this.state.surfacedThreads ?? {}), [memory.threadId]: now.toISOString() };
-      this.state.pendingFollowupThreadId = memory.threadId;
+    this.mind('action', '按触发候选开口', { score, action: 'contact', trigger: trigger.key });
+    if (trigger.threadId) {
+      this.state.surfacedThreads = { ...(this.state.surfacedThreads ?? {}), [trigger.threadId]: now.toISOString() };
+      this.state.pendingFollowupThreadId = trigger.threadId;
       this.state.pendingFollowupAt = now.toISOString();
-    }
-    if (memory?.episodeId) {
-      this.state.surfacedMemories = { ...(this.state.surfacedMemories ?? {}), [memory.episodeId]: now.toISOString() };
     }
     this.state.proactiveCount += 1;
     this.state.proactiveDay = p.date;
@@ -1247,7 +1309,7 @@ export class CompanionWorld implements World {
     this.state.lastCognitionContactAt = now.toISOString();
     this.state.lastCognitionContactText = reason;
     this.state.cognitionAwaitingReply = true;
-    this.state.proactiveDueAt = nextDueAt(now, cfg, now.getTime());
+    clear();
     this.save(true);
     return true;
   }
@@ -1781,7 +1843,7 @@ export class CompanionWorld implements World {
       this.state.proactiveDay = localParts(now, this.tz()).date;
       this.state.lastProactiveAt = now.toISOString();
       this.state.lastProactiveReason = reason;
-      this.state.proactiveDueAt = nextDueAt(now, this.cfg(), now.getTime());
+      this.state.proactiveDueAt = null;
       this.save(true);
       return `已按当前状态开口一次（由头：${reason}）。`;
     }
@@ -1793,10 +1855,9 @@ export class CompanionWorld implements World {
       lastUserAt: this.probeLastUser(now.getTime()),
       countToday: this.countToday(),
     });
-    const due = dueHm(this.state.proactiveDueAt, this.tz());
     return [
       `主动联系：${this.cfg().proactiveEnabled ? '开' : '关'}`,
-      `下一次：${due}`,
+      '下一次：等待生活/状态触发',
       `今天已主动：${this.countToday()} 次（上限 ${this.cfg().proactiveDailyCap || '不限'}）`,
       `上一次由头：${this.state.lastProactiveReason ?? '无'}`,
       gate.ok ? '现在可以开口。' : `现在不会开口：${gate.blockedBy}。`,
