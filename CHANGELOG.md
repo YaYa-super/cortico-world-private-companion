@@ -5,7 +5,7 @@
 - 情绪标签：episode 未显式写 `userEmotion` 时按文本保守识别；记忆面板对旧记录也做读取兜底，识别不到显示「未标注」，不再一律「平淡」。
 - 心理活动：主动被拦不再记成「主动」，单独标 `gate/未开口`；面板每 20 秒自动刷新最近记忆/心理活动，并同步顶部「今日主动」徽标（页面隐藏时暂停）。
 - 兼容 0.4.0 旧日志：`gate` 筛选会把旧的“没开口”proactive 记录也包含进来，面板按 summary 标成「未开口」。
-- 背景念头（Phase 0）：`cognitionMode=off/shadow/act`，每 N 分钟用状态/记忆/日程做一次便宜评估，写 `thought` 日志；shadow 不改行为，act 只允许写日记/休息，contact 仍走原主动闸门。
+- 背景念头（Phase 0）：`cognitionMode=off/shadow/act`，每 N 分钟用状态/记忆/日程做一次便宜评估，写 `thought` 日志；shadow 不改行为，act 只允许写日记/休息，contact 仍走原主动闸门；同一条念头 6 小时内不重复。
 
 ## 0.4.0 — 2026-10-30
 

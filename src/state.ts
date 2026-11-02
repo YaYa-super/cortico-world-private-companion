@@ -53,8 +53,10 @@ export interface CompanionState {
   lastMusingAt: string | null;
   /** 上次背景念头时间（ISO）。 */
   lastCognitionAt: string;
-  /** 上一条已记录的念头 key，避免同一条反复刷屏。 */
+  /** 上一条已记录的念头 key（兼容旧状态）。 */
   lastThoughtKey: string;
+  /** 最近想过/记录过的念头：key → 时间（用于冷却，避免复读）。 */
+  thoughtSeen: Record<string, string>;
   /** 上次结算时间（ISO）。 */
   updatedAt: string;
   /** 下一次允许主动开口的时刻（ISO）；null 表示还没排。 */
@@ -192,6 +194,7 @@ export function createInitialState(now: Date, tz: string, cfg: CompanionConfig):
     lastMusingAt: null,
     lastCognitionAt: '',
     lastThoughtKey: '',
+    thoughtSeen: {},
     updatedAt: now.toISOString(),
     proactiveDueAt: null,
     proactiveCount: 0,

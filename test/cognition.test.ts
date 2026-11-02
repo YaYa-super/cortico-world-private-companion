@@ -32,6 +32,12 @@ test('背景念头：晚上没写日记会想记一句', () => {
   assert.match(thought?.text ?? '', /日记/);
 });
 
+test('背景念头：刚想过的话头不会复读', () => {
+  const input = { ...base, threads: [{ id: 't1', text: '插件还没做完', what: '插件还没做完' }] };
+  assert.equal(think(input)?.action, 'contact');
+  assert.equal(think(input, ['thread:t1']), null);
+});
+
 test('背景念头：没有明显念头时返回 null', () => {
   const thought = think({ ...base, hour: 14, lastUserAt: Date.now(), journalToday: true, threads: [] });
   assert.equal(thought, null);

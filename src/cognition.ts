@@ -33,7 +33,7 @@ export interface Thought {
 const HOUR_MS = 3_600_000;
 
 /** 从一个最小状态集产生“此刻最明显的一个念头”；没有明显念头时返回 null。 */
-export function think(input: ThoughtInput, avoidKey?: string): Thought | null {
+export function think(input: ThoughtInput, avoidKeys: string[] = []): Thought | null {
   const out: Thought[] = [];
   const push = (t: Thought) => {
     if (t.text.trim()) out.push(t);
@@ -106,6 +106,6 @@ export function think(input: ThoughtInput, avoidKey?: string): Thought | null {
 
   if (!out.length) return null;
   out.sort((a, b) => b.salience - a.salience);
-  // 上一条念头如果还是最高分，换一个次高分的，避免同一个话头每 2 分钟刷屏。
-  return out.find((thought) => thought.key !== avoidKey) ?? out[0];
+  // 最近已经想过的念头先放一放；全都想过就宁可安静，也不复读。
+  return out.find((thought) => !avoidKeys.includes(thought.key)) ?? null;
 }

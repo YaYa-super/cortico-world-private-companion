@@ -582,6 +582,11 @@ export class CompanionWorld implements World {
     const journalToday = readJournal(this.dataDir, 200)
       .some((entry) => entry.ts.slice(0, 10) === p.date);
     const cur = currentItem(this.state.agenda, p.minutes);
+    const seen = this.state.thoughtSeen ?? {};
+    const cutoff = now.getTime() - 6 * 3_600_000;
+    const recentKeys = Object.entries(seen)
+      .filter(([, ts]) => Date.parse(ts) > cutoff)
+      .map(([key]) => key);
     const thought = think({
       now,
       hour: p.hour,
@@ -593,9 +598,13 @@ export class CompanionWorld implements World {
       threads,
       ...(episode ? { episode: { id: episode.id, text: episode.text } } : {}),
       ...(cur ? { currentAgenda: cur.title } : {}),
-    }, this.state.lastThoughtKey);
-    if (!thought || thought.key === this.state.lastThoughtKey) return;
+    }, recentKeys);
+    if (!thought) return;
     this.state.lastThoughtKey = thought.key;
+    this.state.thoughtSeen = Object.fromEntries(
+      Object.entries({ ...seen, [thought.key]: now.toISOString() })
+        .filter(([, ts]) => Date.parse(ts) > now.getTime() - 7 * 86_400_000),
+    );
     this.mind('thought', thought.text, {
       action: thought.action,
       salience: thought.salience,
