@@ -1199,6 +1199,21 @@ export class MemoryStore {
     return this.removeWhere((record) => set.has(record.id));
   }
 
+  /** 按 id 收尾/更新一个 thread；供 companion_thread 工具使用。 */
+  updateThread(id: string, patch: { status?: 'open' | 'done' | 'dropped'; what?: string; due?: string }): boolean {
+    const record = this.records.find((item) => item.id === id && item.kind === 'thread');
+    if (!record) return false;
+    record.details = cleanDetails('thread', {
+      ...record.details,
+      ...(patch.status ? { status: patch.status } : {}),
+      ...(patch.what ? { what: patch.what } : {}),
+      ...(patch.due ? { due: patch.due } : {}),
+      lastTouchedAt: new Date().toISOString(),
+    });
+    this.saveRecords();
+    return true;
+  }
+
   private removeWhere(predicate: (record: MemoryRecord) => boolean): number {
     const before = this.records.length;
     const kept = this.records.filter((record) => !predicate(record));

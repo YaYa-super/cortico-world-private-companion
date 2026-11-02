@@ -394,6 +394,45 @@
       "summary": "记忆库维护：统计、导入、导出、裁剪、精确删除。"
     },
     {
+      "name": "companion_thread",
+      "description": "收尾或更新一条未完成的话头。action=done 标记完成；cancel 标记取消；update 改 what/due。用户回复了上次主动追问时，用它判断并收尾，避免反复追问。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "done",
+              "cancel",
+              "update"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "description": "thread 记录 id"
+          },
+          "what": {
+            "type": "string",
+            "description": "update 时新的内容摘要"
+          },
+          "due": {
+            "type": "string",
+            "description": "update 时的新的约定时间"
+          }
+        },
+        "required": [
+          "action",
+          "id"
+        ]
+      },
+      "tags": [
+        "write",
+        "flow"
+      ],
+      "summary": "收尾/更新未完成话头，避免反复追问。"
+    },
+    {
       "name": "companion_consolidate",
       "description": "夜间整理记忆：action=plan 返回过去 24 小时的人话、未完成的约定和整理要求；action=apply 提交 0-6 条结构化记录（episode/fact/person/thread/self）。只写有依据的事，不要写工具回执，不要删东西。",
       "parameters": {

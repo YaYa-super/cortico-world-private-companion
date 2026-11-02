@@ -188,6 +188,23 @@ export const TOOL_SPECS: ToolSpec[] = [
     usage: '一般不用主动调；对方要求导入/导出/清理记忆时才用。导入前先用 mode=dry 看一眼。',
   },
   {
+    name: 'companion_thread',
+    description:
+      '收尾或更新一条未完成的话头。action=done 标记完成；cancel 标记取消；update 改 what/due。'
+      + '用户回复了上次主动追问时，用它判断并收尾，避免反复追问。',
+    parameters: obj(
+      {
+        action: { type: 'string', enum: ['done', 'cancel', 'update'] },
+        id: { type: 'string', description: 'thread 记录 id' },
+        what: { type: 'string', description: 'update 时新的内容摘要' },
+        due: { type: 'string', description: 'update 时的新的约定时间' },
+      },
+      ['action', 'id'],
+    ),
+    tags: ['write', 'flow'],
+    usage: '只在用户已经回应、或话头明确结束/取消时用；不要凭空关闭未确认的话头。',
+  },
+  {
     name: 'companion_consolidate',
     description:
       '夜间整理记忆：action=plan 返回过去 24 小时的人话、未完成的约定和整理要求；'
@@ -228,5 +245,6 @@ export const TOOL_SUMMARIES: Record<string, string> = {
   companion_recall: '在内置记忆里检索笔记、事实、经历与约定。',
   companion_remember: '把值得记住的事写进内置记忆（含常驻笔记）。',
   companion_memory: '记忆库维护：统计、导入、导出、裁剪、精确删除。',
+  companion_thread: '收尾/更新未完成话头，避免反复追问。',
   companion_consolidate: '夜间整理：取材料或提交 0-6 条结构化记忆。',
 };

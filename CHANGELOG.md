@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.1 — 2026-11-02
 
 - 情绪标签：episode 未显式写 `userEmotion` 时按文本保守识别；记忆面板对旧记录也做读取兜底，识别不到显示「未标注」，不再一律「平淡」。
 - 心理活动：主动被拦不再记成「主动」，单独标 `gate/未开口`；面板每 20 秒自动刷新最近记忆/心理活动，并同步顶部「今日主动」徽标（页面隐藏时暂停）。
@@ -29,6 +29,7 @@
 - 第三轮（1-7）：夜间 03:30 错过时当天 08:00 后首次启动补跑；pushEvent 的 `archive-only` 不再算投递/扣配额；stop 时撤回 pending context；工具默认按当前会话 scope（`companion_recall` 可用 `*` 查全库）；合并阈值可配置（`mergeSimilarity`）并支持 `companion_memory action=unmerge`；复习队列与 proactive episode 7 天内去重；周反思错过则在之后 08:00 补跑；巩固/反思 archive-only 不记完成、30 分钟退避重试；离线跨夜按睡眠/清醒分段补算、内部 turn 不再推后 proactive、记忆库加单实例锁、eval 改为临时副本只读、provenance 保留 legacyIds。
 - 第二轮审计修复：巩固窗口改 `p.minute`（真正 03:30）；`memoryEnabled=false` 时裁剪/衰减/合并/巩固全部短路；工具默认 scope 跟随当前会话、`forget` 按 scope；proactive 与 musing 同拍互斥、proactive 并发保护；musing 受 quiet/sleep 约束且推送成功后才计配额；`lastHumanEvent` 不再被乱序旧事件遮住；probe 过滤遥测；rule/person/thread 排除 archived；`intensity/valence/lastUsedAt` 校验；补 `companion.consolidate/reflect/muse` 事件声明；`approve-import` 参数解析。
 - 发布前审计修复：锁改为“活进程一律只读”并补 CLI 锁；`/1` bundle 旧 kind 重新映射（note→rule 等）；tick 重入保护；夜间重试 4 次/天 + 04:00–07:59 重试窗口；面板时间改本地格式、搜索默认当前 scope、unmerge 缺摘要报错；mind CRLF/500 行修复；空库不推巩固。
+- 测试 57 → 69：P0/P1 候选评分、未回应、follow-up、线程工具、实验认知；
 - 测试 40 → 57：情绪词表、markUsed 冷却、工作记忆、情绪回声、合并（limit/衰减/去重/tag/scope）、复习队列、world 集成 echo/muse。
 
 ## 0.3.1 — 2026-10-29

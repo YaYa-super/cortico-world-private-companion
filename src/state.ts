@@ -73,6 +73,8 @@ export interface CompanionState {
   followupReviewAt: string;
   /** 上次结算时间（ISO）。 */
   updatedAt: string;
+  /** 实验性/主动休息：在此之前不按日程覆盖 activity/location。 */
+  restUntil: string;
   /** 下一次允许主动开口的时刻（ISO）；null 表示还没排。 */
   proactiveDueAt: string | null;
   proactiveCount: number;
@@ -219,6 +221,7 @@ export function createInitialState(now: Date, tz: string, cfg: CompanionConfig):
     followupReviewThreadId: '',
     followupReviewAt: '',
     updatedAt: now.toISOString(),
+    restUntil: '',
     proactiveDueAt: null,
     proactiveCount: 0,
     proactiveDay: p.date,
@@ -324,13 +327,21 @@ export function advance(state: CompanionState, now: Date, tz: string, cfg: Compa
     state.sleeping = sleeping;
     changed = true;
   }
-  const item = currentItem(state.agenda, p.minutes);
-  const activity = sleeping ? '睡觉' : item?.title ?? '发呆';
-  const location = sleeping ? '床' : item?.place ?? '屏幕底边';
-  if (state.activity !== activity || state.location !== location) {
-    state.activity = activity;
-    state.location = location;
-    changed = true;
+  const restUntil = Date.parse(state.restUntil ?? '');
+  const resting = Number.isFinite(restUntil) && now.getTime() < restUntil;
+  if (!resting) {
+    const item = currentItem(state.agenda, p.minutes);
+    const activity = sleeping ? '睡觉' : item?.title ?? '发呆';
+    const location = sleeping ? '床' : item?.place ?? '屏幕底边';
+    if (state.activity !== activity || state.location !== location) {
+      state.activity = activity;
+      state.location = location;
+      changed = true;
+    }
+    if (state.restUntil) {
+      state.restUntil = '';
+      changed = true;
+    }
   }
   state.updatedAt = now.toISOString();
   return { state, changed };

@@ -179,6 +179,8 @@ export class CompanionWorld implements World {
         return this.toolRemember(args);
       case 'companion_memory':
         return this.toolMemory(args);
+      case 'companion_thread':
+        return this.toolThread(args);
       case 'companion_consolidate':
         return this.toolConsolidate(args);
       default:
@@ -515,10 +517,11 @@ export class CompanionWorld implements World {
       if (this.cfg().memoryEnabled) this.memoryStore.maybePrune(this.cfg().memoryRetentionDays);
       this.scheduleNightly(new Date(), localParts(new Date(), this.tz()));
       const now = new Date();
+      // 先处理用户回复/未回应，再生成上下文，follow-up 才能赶上这一轮。
+      this.refreshCognitionFeedback(now);
       await this.pushContext();
       const woke = await this.maybeProactive(now);
       if (!woke) await this.maybeMuse(now);
-      this.refreshCognitionFeedback(now);
       this.scheduleCognition(now);
       await this.processIntentions(now);
     } catch (error) {
@@ -592,7 +595,7 @@ export class CompanionWorld implements World {
       .filter((record) => record.kind === 'episode' && !episodeIds.has(record.id))
       .map((record) => ({ id: record.id, text: record.text }));
     const journalToday = readJournal(this.dataDir, 200)
-      .some((entry) => entry.ts.slice(0, 10) === p.date);
+      .some((entry) => formatLocal(entry.ts, this.tz()).slice(0, 10) === p.date);
     const cur = currentItem(this.state.agenda, p.minutes);
     const next = upcomingItem(this.state.agenda, p.minutes);
     const seen = this.state.thoughtSeen ?? {};
@@ -656,18 +659,32 @@ export class CompanionWorld implements World {
 
   /** 处理到期的意图；contact 只 hold，不自动发消息。 */
   private async processIntentions(now: Date): Promise<void> {
-    if (this.cfg().cognitionMode !== 'act') return;
     const intentions = this.state.intentions ?? [];
     if (!intentions.length) return;
     const p = localParts(now, this.tz());
     let changed = false;
+    // 过期清理与实验开关无关，关掉实验后 pending 也不能永远挂着。
+    for (const intention of intentions) {
+      if (intention.status === 'pending'
+        && now.getTime() - Date.parse(intention.createdAt) > 12 * 3_600_000) {
+        intention.status = 'expired';
+        changed = true;
+      }
+    }
+    if (this.cfg().cognitionMode !== 'act') {
+      if (changed) {
+        this.state.intentions = intentions.slice(-20);
+        this.save(true);
+      }
+      return;
+    }
     for (const intention of intentions) {
       if (intention.status !== 'pending') continue;
       const due = Date.parse(intention.dueAt);
       if (!Number.isFinite(due) || due > now.getTime()) continue;
       if (intention.action === 'journal') {
         const hasJournal = readJournal(this.dataDir, 500)
-          .some((entry) => entry.ts.slice(0, 10) === p.date);
+          .some((entry) => formatLocal(entry.ts, this.tz()).slice(0, 10) === p.date);
         if (!hasJournal) {
           const digest = this.memoryStore.todayDigest(3, this.activeScope()).slice(0, 300);
           appendJournal(this.dataDir, {
@@ -684,6 +701,7 @@ export class CompanionWorld implements World {
       } else if (intention.action === 'rest') {
         this.state.activity = '打盹';
         this.state.location = '床';
+        this.state.restUntil = new Date(now.getTime() + 30 * 60_000).toISOString();
         this.snapshot?.invalidate();
         this.mind('action', '按意图去休息了', { intentionId: intention.id });
         intention.status = 'done';
@@ -700,44 +718,55 @@ export class CompanionWorld implements World {
         changed = true;
       }
     }
-    if (intentions.some((intention) => intention.status === 'pending'
-      && now.getTime() - Date.parse(intention.createdAt) > 12 * 3_600_000)) {
-      for (const intention of intentions) {
-        if (intention.status === 'pending' && now.getTime() - Date.parse(intention.createdAt) > 12 * 3_600_000) {
-          intention.status = 'expired';
-        }
-      }
-      changed = true;
-    }
     if (changed) {
       this.state.intentions = intentions.slice(-20);
       this.save(true);
     }
   }
 
-  /** 实验性：未回应降速 / 用户回复后的 follow-up 审计。 */
+  /** 未回应降速 / 用户回复后的 follow-up 审计（正常主动与实验共用）。 */
   private refreshCognitionFeedback(now: Date): void {
-    if (!this.state.cognitionAwaitingReply || !this.state.lastCognitionContactAt) return;
+    // follow-up 复核只保留 24h，超期清掉，避免永久注入。
+    const reviewAt = Date.parse(this.state.followupReviewAt ?? '');
+    if (this.state.followupReviewThreadId && Number.isFinite(reviewAt)
+      && now.getTime() - reviewAt > 24 * 3_600_000) {
+      this.state.followupReviewThreadId = '';
+      this.state.followupReviewAt = '';
+      this.save(true);
+    }
     const last = Date.parse(this.state.lastCognitionContactAt);
     if (!Number.isFinite(last)) return;
+    // 已经处理过的老回复不重复 save；只有仍在等待、还有未回应计数或 pending
+    // 话头时才需要再看一次用户是否回复。
+    if (!this.state.cognitionAwaitingReply && !this.state.cognitionUnanswered
+      && !this.state.pendingFollowupThreadId) return;
     const lastUser = this.probeLastUser(now.getTime());
+    // 用户回复必须无条件清零，即使上一轮已经超时把 awaiting 置 false；
+    // 否则 unanswered 会卡在 2，两条主动路径一起永久停摆。
     if (lastUser && lastUser > last) {
+      const wasAwaiting = this.state.cognitionAwaitingReply;
       this.state.cognitionAwaitingReply = false;
       this.state.cognitionUnanswered = 0;
-      if (this.state.pendingFollowupThreadId) {
+      if (wasAwaiting && this.state.pendingFollowupThreadId) {
         this.state.followupReviewThreadId = this.state.pendingFollowupThreadId;
         this.state.followupReviewAt = now.toISOString();
         this.mind('followup', '用户回复了，待复核话头', {
           threadId: this.state.pendingFollowupThreadId,
           since: this.state.pendingFollowupAt,
         });
-        this.state.pendingFollowupThreadId = '';
-        this.state.pendingFollowupAt = '';
       }
+      this.state.pendingFollowupThreadId = '';
+      this.state.pendingFollowupAt = '';
       this.save(true);
-    } else if (now.getTime() - last > 3 * 3_600_000) {
+      return;
+    }
+    if (!this.state.cognitionAwaitingReply) return;
+    if (now.getTime() - last > 3 * 3_600_000) {
       this.state.cognitionAwaitingReply = false;
       this.state.cognitionUnanswered = Math.min(3, (this.state.cognitionUnanswered ?? 0) + 1);
+      // 超时后旧 pending 已失去归属，不能等下一次回复时张冠李戴。
+      this.state.pendingFollowupThreadId = '';
+      this.state.pendingFollowupAt = '';
       this.mind('review', `上次联系后 ${Math.round((now.getTime() - last) / 3_600_000)} 小时没回复，降速`, {
         unanswered: this.state.cognitionUnanswered,
       });
@@ -754,9 +783,11 @@ export class CompanionWorld implements World {
     const cfg = this.cfg();
     if (cfg.cognitionContactMode !== 'send') return { ok: false, reason: 'hold 模式，只放在心里' };
     if (!cfg.proactiveEnabled) return { ok: false, reason: '主动联系已关闭' };
+    // 认知 contact 不应被旧 proactiveDueAt 的“还没到下一次”卡住；只保留
+    // 免打扰/睡眠/额度/刚聊完这些真正的发送前闸门。
     const gate = evaluate({
       cfg,
-      state: this.state,
+      state: { ...this.state, proactiveDueAt: null },
       now,
       tz: this.tz(),
       lastUserAt: this.probeLastUser(now.getTime()),
@@ -780,6 +811,7 @@ export class CompanionWorld implements World {
     this.state.lastCognitionContactAt = now.toISOString();
     this.state.lastCognitionContactText = intention.text;
     this.state.cognitionAwaitingReply = true;
+    this.state.proactiveDueAt = nextDueAt(now, cfg, now.getTime());
     if (intention.refs?.threadId) {
       this.state.pendingFollowupThreadId = String(intention.refs.threadId);
       this.state.pendingFollowupAt = now.toISOString();
@@ -1142,10 +1174,7 @@ export class CompanionWorld implements World {
       action: 'contact' as const,
       source: memory ? 'memory' : 'agenda',
     };
-    const score = scoreThought(candidate, {
-      unanswered: this.state.cognitionUnanswered ?? 0,
-      busy,
-    });
+    const score = scoreThought(candidate, { busy });
     this.mind('candidate', `${score >= 0.55 ? '保留' : '暂缓'}：${reason}`, {
       score,
       action: 'contact',
@@ -1181,6 +1210,7 @@ export class CompanionWorld implements World {
     if (this.state.energy < 20 && !memory) {
       this.state.activity = '打盹';
       this.state.location = '床';
+      this.state.restUntil = new Date(now.getTime() + 30 * 60_000).toISOString();
       this.state.proactiveDueAt = nextDueAt(now, cfg, now.getTime());
       this.mind('action', '精力太低，先去休息而不是找人', { score, action: 'rest' });
       this.snapshot?.invalidate();
@@ -1385,6 +1415,33 @@ export class CompanionWorld implements World {
       .join('\n');
   }
 
+  private async toolThread(args: Record<string, unknown>): Promise<string | ToolOutcome> {
+    const action = String(args.action ?? 'update');
+    const id = trimText(args.id, 64);
+    if (!id) return this.fail('要更新哪条话头？id 不能为空。');
+    if (!['done', 'cancel', 'update'].includes(action)) return this.fail('action 只有 done / cancel / update。');
+    const patch = action === 'done' ? { status: 'done' as const }
+      : action === 'cancel' ? { status: 'dropped' as const }
+        : {
+          status: 'open' as const,
+          ...(trimText(args.what, 160) ? { what: trimText(args.what, 160) } : {}),
+          ...(trimText(args.due, 40) ? { due: trimText(args.due, 40) } : {}),
+        };
+    if (!this.memoryStore.updateThread(id, patch)) return this.fail(`没找到话头 ${id.slice(0, 8)}。`);
+    this.snapshot?.invalidate();
+    if (this.state.pendingFollowupThreadId === id) {
+      this.state.pendingFollowupThreadId = '';
+      this.state.pendingFollowupAt = '';
+    }
+    if (this.state.followupReviewThreadId === id) {
+      this.state.followupReviewThreadId = '';
+      this.state.followupReviewAt = '';
+    }
+    this.mind('memory', `话头${action === 'done' ? '完成' : action === 'cancel' ? '取消' : '更新'}：${id.slice(0, 8)}`);
+    this.save(true);
+    return action === 'done' ? '这条话头已收尾。' : action === 'cancel' ? '这条话头已取消。' : '话头已更新。';
+  }
+
   private async toolRemember(args: Record<string, unknown>): Promise<string> {
     if (!this.cfg().memoryEnabled) return '内置记忆已关闭（设置 → 我会永远陪着你 → 内置记忆）。';
     const text = trimText(args.text, 600);
@@ -1558,6 +1615,14 @@ export class CompanionWorld implements World {
       .slice(0, 3);
     this.memoryStore.markUsed(recent.map((record) => record.id));
     const echo = cfg.emotionEchoEnabled !== false ? this.emotionEcho(scope) : null;
+    let followup: string | undefined;
+    const reviewAt = Date.parse(this.state.followupReviewAt ?? '');
+    if (this.state.followupReviewThreadId && Number.isFinite(reviewAt)
+      && Date.now() - reviewAt < 24 * 3_600_000) {
+      const thread = this.memoryStore.entries()
+        .find((record) => record.id === this.state.followupReviewThreadId);
+      if (thread) followup = (thread.details?.what ?? thread.text).slice(0, 120);
+    }
     return {
       // 规则是硬约束，不截断；单条超过 400 字才做保护性截断。
       rules: rules.map((record) => (record.text.length > 400 ? `${record.text.slice(0, 400)}…` : record.text)),
@@ -1566,6 +1631,7 @@ export class CompanionWorld implements World {
       echo: echo?.text,
       echoId: echo?.id,
       echoEventId: echo?.eventId,
+      ...(followup ? { followup } : {}),
       recent: recent.map((record) => record.text.slice(0, 120)),
     };
   }

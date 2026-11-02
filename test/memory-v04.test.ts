@@ -188,3 +188,17 @@ test('导入 /1 旧 kind：note/profile/reflection/commitment 会映射到 v2 �
   const rule = store.entries().find((record) => record.kind === 'rule');
   assert.equal(rule?.details?.pinned, true);
 });
+
+test('thread 可以按 id 收尾/更新', () => {
+  const store = fresh();
+  const added = store.add({
+    kind: 'thread',
+    text: '答应帮爸爸看插件',
+    scope: 'main',
+    details: { what: '看插件', status: 'open' },
+  });
+  assert.equal(store.updateThread(added.id, { status: 'done', what: '看完了' }), true);
+  const thread = store.entries().find((record) => record.id === added.id);
+  assert.equal(thread?.details?.status, 'done');
+  assert.equal(thread?.details?.what, '看完了');
+});

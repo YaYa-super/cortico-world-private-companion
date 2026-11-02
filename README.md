@@ -5,7 +5,7 @@
 > 把 AstrBot 插件 [`astrbot_plugin_private_companion`](https://github.com/menglimi/astrbot_plugin_private_companion)（中文名同样是「我会永远陪着你」）里
 > **“有自己的生活、会在合适的时候主动开口”** 这套机制，独立实现成 Coopanion 的 World 扩展。
 
-npm：`cortico-world-private-companion` · 当前 `0.4.0`（已发布）。首次升级请先备份 `records.json`/`.bak`/`state.json`：0.4 首次启动会按需补跑夜间整理。
+npm：`cortico-world-private-companion` · 当前 `0.4.0`（已发布）；`0.4.1` 已实现、待发布（P0/P1 主动策略 + 实验性认知 UI）。首次升级请先备份 `records.json`/`.bak`/`state.json`。
 
 ## 致谢与来源
 
@@ -104,6 +104,7 @@ node "D:\Coopanion\resources\app\node_modules\pnpm\bin\pnpm.cjs" install --no-fr
 - `companion_profile` — 读/写关系卡（`action=list` 列出所有卡）
 - `companion_journal` — 写/读日记
 - `companion_remember` — 写入记忆：`episode`（可带 `userEmotion`）/ `fact` / `person` / `thread` / `self` / `rule`；`tags: ["musing"]` 表示胡思乱想
+- `companion_thread` — 收尾/更新未完成话头（`done` / `cancel` / `update`），配合 follow-up 复核
 - `companion_recall` — 在记忆库里检索（记录 + 最近捕获的对话；`includeArchived` 可翻合并前的原文）
 - `companion_memory` — 维护：`stats` / `export` / `import` / `prune` / `forget`（import 只读 `data/private-companion/imports/` 下的 `.json`）
 - `companion_consolidate` — 夜间整理：`plan` 取材料，`apply` 提交 0-6 条记录
@@ -114,7 +115,7 @@ node "D:\Coopanion\resources\app\node_modules\pnpm\bin\pnpm.cjs" install --no-fr
 除了实验性的「念头 → 意图」，日常 proactive 本身已经带 P0/P1 策略：
 
 - **候选评分**：由头/记忆证据先打分，低于阈值只记 `candidate/review`，不开口；
-- **未回应降速**：联系后 3 小时无回复，累计未回应，候选分数下降；连续 2 次未回应不再联系；
+- **未回应降速**：联系后 3 小时无回复，累计未回应；连续 2 次未回应不再联系；
 - **发送前复核**：当前日程繁忙、和上次太像、连续未回应时暂缓；
 - **审计**：心理活动里能看到 `候选/复核/主动/行动`；
 - **follow-up**：主动联系涉及未完话头时，用户回复后把话头标成“待复核”注入上下文，让模型完成/取消/更新；
@@ -144,7 +145,7 @@ World 页新增「记忆」面板（`src/webui/client.js`）：
 ## 开发
 
 ```bash
-node --test            # 66 个用例：时区/状态/主动/记忆库（损坏恢复、去重、检索、隔离区、导出 scope、裁剪、事件过滤、情绪/复习/合并/musing）
+node --test            # 69 个用例：时区/状态/主动/记忆库（损坏恢复、去重、检索、隔离区、导出 scope、裁剪、事件过滤、情绪/复习/合并/musing）
 node tools/import-memory-extra.mjs --dry   # 预览从旧记忆库能导多少
 node tools/eval-memory.mjs                 # 32 问记忆评测：recall@3 / 纯度 / p95
 node tools/eval-persona.mjs                # 6 问人格卡评测（CONSTITUTION）
