@@ -861,7 +861,7 @@ export class CompanionWorld implements World {
     if (!gate.ok) {
       if (this.lastMindGate !== gate.code) {
         this.lastMindGate = gate.code;
-        this.mind('proactive', `没开口：${gate.blockedBy}`, { code: gate.code });
+        this.mind('gate', `没开口：${gate.blockedBy}`, { code: gate.code });
       }
       // 被睡觉/免打扰拦住时，把下一次排到窗口结束后，免得醒来还在原地打转。
       if (gate.code === 'sleep') {

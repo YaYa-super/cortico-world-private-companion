@@ -46,6 +46,7 @@ const ZH = {
   columnTime: '时间',
   columnSummary: '摘要',
   typeProactive: '主动',
+  typeGate: '未开口',
   typeEcho: '回声',
   typeMemory: '记忆',
   typeNightly: '夜间',
@@ -120,6 +121,7 @@ const EN = {
   columnTime: 'Time',
   columnSummary: 'Summary',
   typeProactive: 'Proactive',
+  typeGate: 'Skipped',
   typeEcho: 'Echo',
   typeMemory: 'Memory',
   typeNightly: 'Nightly',
@@ -160,7 +162,7 @@ export default {
         const card = ui.sheet({ title: S.title, desc: S.desc });
         const message = ui.msgline();
         const facts = ui.h('div');
-        const refresh = ui.button(S.refresh, { onClick: () => { void loadOverview(); void loadRecent(); void loadMind(); void loadMerges(); } });
+        const refresh = ui.button(S.refresh, { onClick: () => { void refreshAll(); } });
         const overview = ui.h('div');
         const overviewHead = ui.section(S.overview, S.overviewDesc);
         const overviewBar = ui.rowbar();
@@ -179,6 +181,7 @@ export default {
           options: [
             { value: '', label: S.mindAll },
             { value: 'proactive', label: S.typeProactive },
+            { value: 'gate', label: S.typeGate },
             { value: 'echo', label: S.typeEcho },
             { value: 'memory', label: S.typeMemory },
             { value: 'nightly', label: S.typeNightly },
@@ -321,6 +324,7 @@ export default {
             const events = result.events ?? [];
             const labels = {
               proactive: S.typeProactive,
+              gate: S.typeGate,
               echo: S.typeEcho,
               memory: S.typeMemory,
               nightly: S.typeNightly,
@@ -330,7 +334,9 @@ export default {
             for (const event of events) {
               mindTable.addRow([
                 event.time ?? String(event.ts ?? '').slice(11, 19),
-                labels[event.type] ?? event.type,
+                event.type === 'proactive' && String(event.summary ?? '').startsWith('没开口：')
+                  ? S.typeGate
+                  : (labels[event.type] ?? event.type),
                 String(event.summary ?? '').slice(0, 220),
               ]);
             }
@@ -354,11 +360,7 @@ export default {
                     const undone = await ctx.invoke('unmerge', [row.id]);
                     if (!undone.found || !undone.restored) throw new Error(S.unmergeMissing);
                     ui.toast(S.unmerged(undone.restored ?? 0), 'ok');
-                    await loadOverview();
-                    await loadRecent();
-                    await loadMind();
-                    await loadMerges();
-                    void ctx.refresh().catch(() => { /* Refresh badges. */ });
+                    await refreshAll();
                   } catch (error) {
                     showError(error);
                   }
@@ -375,11 +377,31 @@ export default {
           }
         }
 
+        let refreshing = false;
+        async function refreshAll() {
+          if (refreshing) return;
+          refreshing = true;
+          try {
+            await loadOverview();
+            await loadRecent();
+            await loadMind();
+            await loadMerges();
+            await ctx.refresh().catch(() => { /* 顶部徽标刷新失败不影响面板数据。 */ });
+          } finally {
+            refreshing = false;
+          }
+        }
+
         message.textContent = S.loading;
         await loadOverview();
         await loadRecent();
         await loadMind();
         await loadMerges();
+        // 面板可见时自动刷新：最近记忆/心理活动 + 顶部「今日主动」徽标；隐藏时跳过。
+        ctx.interval(() => {
+          if (ctx.root.ownerDocument?.visibilityState === 'hidden') return;
+          void refreshAll();
+        }, 20_000);
       },
     },
   },

@@ -20,7 +20,9 @@ test('心理活动日志：倒序、按类型过滤、坏行跳过', () => {
   const all = log.tail(10);
   assert.equal(all.length, 3);
   assert.equal(all[0].summary, '记住 episode：一起看海');
+  log.append({ type: 'gate', summary: '没开口：免打扰' });
   assert.equal(log.tail(10, 'echo').length, 1);
+  assert.equal(log.tail(10, 'gate').length, 1);
   assert.equal(log.tail(10, 'echo')[0].summary, '回声：上次加班');
   const text = readFileSync(file, 'utf8');
   assert.match(text, /"type":"proactive"/);
