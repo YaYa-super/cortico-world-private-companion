@@ -650,10 +650,11 @@ export class CompanionWorld implements World {
         const hasJournal = readJournal(this.dataDir, 500)
           .some((entry) => entry.ts.slice(0, 10) === p.date);
         if (!hasJournal) {
+          const digest = this.memoryStore.todayDigest(3, this.activeScope()).slice(0, 300);
           appendJournal(this.dataDir, {
             ts: now.toISOString(),
             kind: 'thought',
-            text: `【自己想的】${intention.text}`,
+            text: `【自己想的】${digest || intention.text}`,
           });
           this.mind('action', '按意图写了一笔日记', { intentionId: intention.id });
         } else {
