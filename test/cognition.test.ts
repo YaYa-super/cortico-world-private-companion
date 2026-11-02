@@ -47,6 +47,16 @@ test('念头会变成有到期时间的意图', () => {
   assert.equal(Date.parse(intention.dueAt) - base.now.getTime(), 30 * 60_000);
 });
 
+test('同一段记忆不会用两种说法反复出现', () => {
+  const input = {
+    ...base,
+    episodes: [{ id: 'e1', text: '昨晚一起看海' }],
+    memories: [{ id: 'e1', text: '昨晚一起看海' }],
+  };
+  assert.equal(think(input)?.key, 'memory:e1');
+  assert.equal(think(input, ['memory:e1']), null);
+});
+
 test('背景念头：没有明显念头时返回 null', () => {
   const thought = think({ ...base, hour: 14, lastUserAt: Date.now(), journalToday: true, threads: [] });
   assert.equal(thought, null);

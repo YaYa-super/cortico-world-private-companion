@@ -89,7 +89,7 @@ export function think(input: ThoughtInput, avoidKeys: string[] = []): Thought | 
 
   for (const episode of (input.episodes ?? []).slice(0, 2)) {
     push({
-      key: `recall:${episode.id}`,
+      key: `memory:${episode.id}`,
       text: `忽然想起：${episode.text.slice(0, 50)}`,
       salience: 0.5,
       action: 'silent',

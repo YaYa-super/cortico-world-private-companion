@@ -8,6 +8,7 @@
 - 背景念头（Phase 0）：`cognitionMode=off/shadow/act`，每 N 分钟用状态/记忆/日程做一次便宜评估，写 `thought` 日志；shadow 不改行为，act 只允许写日记/休息，contact 仍走原主动闸门；同一条念头 6 小时内不重复。
 - 念头 → 意图：高显著性念头形成带到期时间的 intention；`act` 下 journal/rest 会真正执行，contact 只 hold（记「想找他但先放在心里」），不自动发消息；面板新增 `意图/行动` 筛选。
 - 自动日记正文改为当天 episode/事件摘要（`todayDigest`），不再只写“今天还没写日记”这句自指念头。
+- 念头去重：episode 与近期记忆共用 `memory:<id>` key，同一段记忆不会换种说法再次出现。
 
 ## 0.4.0 — 2026-10-30
 

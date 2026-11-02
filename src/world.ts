@@ -581,8 +581,9 @@ export class CompanionWorld implements World {
       .map((thread) => ({ id: thread.id, text: thread.text, what: thread.details?.what }));
     const episodes = this.memoryStore.highIntensityEpisodes(7, 2)
       .map((episode) => ({ id: episode.id, text: episode.text }));
+    const episodeIds = new Set(episodes.map((episode) => episode.id));
     const memories = this.memoryStore.recent(5, this.activeScope())
-      .filter((record) => record.kind === 'episode')
+      .filter((record) => record.kind === 'episode' && !episodeIds.has(record.id))
       .map((record) => ({ id: record.id, text: record.text }));
     const journalToday = readJournal(this.dataDir, 200)
       .some((entry) => entry.ts.slice(0, 10) === p.date);
