@@ -583,7 +583,7 @@ export class CompanionWorld implements World {
   private async refreshHolidays(now: Date): Promise<void> {
     if (!this.cfg().holidayEnabled) return;
     const p = localParts(now, this.tz());
-    if (this.state.lastHolidayAt.slice(0, 10) === p.date) return;
+    if (this.state.lastHolidayAt && formatLocal(this.state.lastHolidayAt, this.tz()).slice(0, 10) === p.date) return;
     this.state.lastHolidayAt = now.toISOString();
     const year = Number(p.date.slice(0, 4));
     try {
