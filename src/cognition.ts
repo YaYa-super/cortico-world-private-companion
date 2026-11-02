@@ -186,7 +186,7 @@ export function scoreThought(
   thought: Thought,
   input: { unanswered?: number; busy?: boolean } = {},
 ): number {
-  const weights: Record<string, number> = { memory: 0.08, social: 0.04, body: 0.06, self: 0.04, agenda: 0, weather: 0.05 };
+  const weights: Record<string, number> = { memory: 0.08, social: 0.04, body: 0.06, self: 0.04, agenda: 0.12, weather: 0.05 };
   const base = thought.salience + (weights[thought.source] ?? 0);
   const penalty = Math.min(0.4, Math.max(0, input.unanswered ?? 0) * 0.12)
     + (input.busy ? 0.15 : 0);
