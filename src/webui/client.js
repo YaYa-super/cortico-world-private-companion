@@ -4,7 +4,8 @@
  */
 const ZH = {
   title: '记忆',
-  experimental: '实验性：念头 → 意图',
+  experimental: '念头 → 意图',
+  experimentalNote: '以下为试验性功能',
   experimentalDesc: '默认关闭。shadow 只记录“此刻想到了什么”；act 会按意图写日记/休息；contact 默认只 hold，不主动发消息。实验功能，行为可能变化。',
   cogMode: '模式',
   cogInterval: '间隔（分钟）',
@@ -92,7 +93,8 @@ const ZH = {
 
 const EN = {
   title: 'Memory',
-  experimental: 'Experimental: thought → intention',
+  experimental: 'Thought → intention',
+  experimentalNote: 'Experimental features below',
   experimentalDesc: 'Off by default. shadow only logs thoughts; act writes journal/rest from intentions; contact defaults to hold, never sends. Experimental; behavior may change.',
   cogMode: 'Mode',
   cogInterval: 'Interval (min)',
@@ -191,7 +193,7 @@ export default {
         const refresh = ui.button(S.refresh, { onClick: () => { void refreshAll(); } });
         const experimental = ui.h('div');
         const experimentalFacts = ui.h('div');
-        experimental.append(ui.section(S.experimental, S.experimentalDesc), experimentalFacts);
+        experimental.append(ui.msgline(S.experimentalNote), ui.section(S.experimental, S.experimentalDesc), experimentalFacts);
 
         const overview = ui.h('div');
         const overviewHead = ui.section(S.overview, S.overviewDesc);
@@ -244,7 +246,7 @@ export default {
         const mergeSection = ui.h('div');
         mergeSection.append(ui.section(S.merges, S.mergesDesc), mergeTable.el);
 
-        card.body.append(experimental, overview, nowSection, recentSection, mindSection, searchSection, mergeSection, message);
+        card.body.append(overview, nowSection, recentSection, mindSection, searchSection, mergeSection, experimental, message);
         root.append(card.el);
 
         function value(v) {
