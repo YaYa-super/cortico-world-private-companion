@@ -55,6 +55,8 @@ export interface CompanionConfig {
   weatherEnabled: boolean;
   /** 天气城市名；空 = 不查询。 */
   weatherCity: string;
+  /** 是否启用节日触发（固定公历 + nager.date 中国法定节假日）。 */
+  holidayEnabled: boolean;
   /** 心理活动日志级别：off 关闭，summary 只记决策摘要。 */
   mindLogLevel: 'off' | 'summary';
   /** 实验性：背景念头。off 关闭；shadow 只记念头；act 允许写日记/休息。 */
@@ -94,6 +96,7 @@ export const COMPANION_DEFAULTS: CompanionConfig = {
   mergeSimilarity: 0.5,
   weatherEnabled: false,
   weatherCity: '',
+  holidayEnabled: false,
   mindLogLevel: 'summary',
   cognitionMode: 'off',
   cognitionIntervalMin: 10,
@@ -288,6 +291,12 @@ export const COMPANION_CONFIG_GROUP: CompanionConfigGroup = {
         type: 'string',
         title: '天气城市',
         description: '例如「杭州」「北京」。只用于地理编码和天气查询；留空则不查询。',
+      },
+      'worlds.companion.holidayEnabled': {
+        type: 'boolean',
+        title: '节日触发',
+        description: '开启后每天查一次中国法定节假日（nager.date，免费）；失败时回退到固定公历节日。默认关闭。',
+        'x-hot': true,
       },
       'worlds.companion.cognitionMode': {
         type: 'string',

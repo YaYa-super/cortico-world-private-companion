@@ -27,6 +27,7 @@ import { MindLog, type MindType } from './mind.ts';
 import { MEMORY_KINDS, MemoryStore, scopeKey, type MemoryKind, type MemoryRecord } from './memory-store.ts';
 import { isHumanEvent, scopeOfEvent } from './event-filter.ts';
 import { fetchWeather, weatherTrigger } from './weather.ts';
+import { fetchHolidays, fixedHolidays } from './holidays.ts';
 import {
   MAIN_KEY, appendJournal, ensureDir, journalPath, readJournal, readJson, writeJsonAtomic,
   type JournalEntry, type Profile, type ProfileMap,
@@ -522,6 +523,7 @@ export class CompanionWorld implements World {
       // 先处理用户回复/未回应，再生成上下文，follow-up 才能赶上这一轮。
       this.refreshCognitionFeedback(now);
       await this.refreshWeather(now);
+      await this.refreshHolidays(now);
       this.scheduleProactiveTriggers(now);
       await this.pushContext();
       const woke = await this.maybeProactive(now);
@@ -577,6 +579,23 @@ export class CompanionWorld implements World {
     }
   }
 
+  /** 节日：每天一次；失败回退固定公历节日。 */
+  private async refreshHolidays(now: Date): Promise<void> {
+    if (!this.cfg().holidayEnabled) return;
+    const p = localParts(now, this.tz());
+    if (this.state.lastHolidayAt.slice(0, 10) === p.date) return;
+    this.state.lastHolidayAt = now.toISOString();
+    const year = Number(p.date.slice(0, 4));
+    try {
+      this.state.holidays = await fetchHolidays(year);
+      this.save(true);
+    } catch (error) {
+      this.state.holidays = fixedHolidays(year);
+      this.host?.log.warn('[companion] 节日查询失败，回退固定节日', String(error));
+      this.save(true);
+    }
+  }
+
   /** 天气：Open-Meteo，30 分钟一次；失败只记日志，不影响主动。 */
   private async refreshWeather(now: Date): Promise<void> {
     const cfg = this.cfg();
@@ -594,7 +613,7 @@ export class CompanionWorld implements World {
       this.save(true);
       if (this.state.pendingTrigger) return;
       const date = formatLocal(current.at, this.tz()).slice(0, 10);
-      const trigger = weatherTrigger(previous, current, date);
+      const trigger = weatherTrigger(previous, current, date, localParts(now, this.tz()).hour);
       if (!trigger) return;
       const seen = this.state.triggerSeen ?? {};
       const lastTrigger = Date.parse(seen[trigger.key] ?? '');
@@ -677,7 +696,19 @@ export class CompanionWorld implements World {
         push(`thread-due:${thread.id}`, `上次说好的事到期了：${what}`, 'memory', 0.9, thread.id);
       } else if (Number.isFinite(due) && due - now.getTime() <= 24 * 3_600_000) {
         push(`thread-soon:${thread.id}`, `约好的事快到了：${what}`, 'memory', 0.8, thread.id);
+      } else {
+        const touched = Date.parse(thread.details?.lastTouchedAt ?? thread.ts);
+        if (Number.isFinite(touched) && now.getTime() - touched > 3 * 86_400_000) {
+          push(`thread-stale:${thread.id}`, `有件事一直没下文：${what}`, 'memory', 0.7, thread.id);
+        }
       }
+    }
+    if (this.state.energy >= 80 && this.state.mood >= 75) {
+      push('body:high', '今天状态很好，想把这点好心情分他一点。', 'body', 0.55);
+    }
+    const holiday = this.state.holidays?.[p.date];
+    if (holiday) {
+      push(`holiday:${p.date}`, `今天是${holiday}。`, 'social', 0.82);
     }
     const todayMonthDay = p.date.slice(5);
     const year = Number(p.date.slice(0, 4));

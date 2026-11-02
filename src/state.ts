@@ -95,6 +95,9 @@ export interface CompanionState {
   /** 最近一次天气快照；没有启用/没查到为 null。 */
   weather: WeatherSnapshot | null;
   lastWeatherAt: string;
+  /** 今年的节日表 date → name；以及上次查询日期。 */
+  holidays: Record<string, string>;
+  lastHolidayAt: string;
   /** 下一次允许主动开口的时刻（ISO）；null 表示还没排。 */
   proactiveDueAt: string | null;
   proactiveCount: number;
@@ -248,6 +251,8 @@ export function createInitialState(now: Date, tz: string, cfg: CompanionConfig):
     lastSleeping: false,
     weather: null,
     lastWeatherAt: '',
+    holidays: {},
+    lastHolidayAt: '',
     proactiveDueAt: null,
     proactiveCount: 0,
     proactiveDay: p.date,
