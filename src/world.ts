@@ -22,6 +22,7 @@ import { TOOL_SPECS } from './tools.ts';
 import { evaluate, reasonFor } from './proactive.ts';
 import { SnapshotPusher } from './snapshot.ts';
 import { detectEmotion, relatedWords } from './emotion.ts';
+import { think, type Thought } from './cognition.ts';
 import { MindLog, type MindType } from './mind.ts';
 import { MEMORY_KINDS, MemoryStore, scopeKey, type MemoryKind, type MemoryRecord } from './memory-store.ts';
 import { isHumanEvent, scopeOfEvent } from './event-filter.ts';
@@ -512,6 +513,7 @@ export class CompanionWorld implements World {
       await this.pushContext();
       const woke = await this.maybeProactive(now);
       if (!woke) await this.maybeMuse(now);
+      this.scheduleCognition(now);
     } catch (error) {
       this.host?.log.warn('[companion] tick 失败', String(error));
     } finally {
@@ -558,6 +560,70 @@ export class CompanionWorld implements World {
       this.memoryStore.markUsed([memory.echoId]);
       this.mind('echo', memory.echo ?? '情绪回声', { memoryId: memory.echoId });
       this.save(true);
+    }
+  }
+
+  /** 背景念头：便宜的评估，不调用模型；shadow 只记，act 允许写日记/休息。 */
+  private scheduleCognition(now: Date): void {
+    const cfg = this.cfg();
+    const mode = cfg.cognitionMode;
+    if (!mode || mode === 'off') return;
+    const interval = Math.min(60, Math.max(1, Number(cfg.cognitionIntervalMin) || 10)) * 60_000;
+    const last = Date.parse(this.state.lastCognitionAt);
+    if (Number.isFinite(last) && now.getTime() - last < interval) return;
+    this.state.lastCognitionAt = now.toISOString();
+    this.save(true);
+    if (this.state.sleeping) return;
+
+    const p = localParts(now, this.tz());
+    const threads = this.memoryStore.openThreads(0).slice(0, 1)
+      .map((thread) => ({ id: thread.id, text: thread.text, what: thread.details?.what }));
+    const episode = this.memoryStore.highIntensityEpisodes(7, 1)[0];
+    const journalToday = readJournal(this.dataDir, 200)
+      .some((entry) => entry.ts.slice(0, 10) === p.date);
+    const cur = currentItem(this.state.agenda, p.minutes);
+    const thought = think({
+      now,
+      hour: p.hour,
+      energy: this.state.energy,
+      mood: this.state.mood,
+      activity: this.state.activity,
+      lastUserAt: this.probeLastUser(now.getTime()),
+      journalToday,
+      threads,
+      ...(episode ? { episode: { id: episode.id, text: episode.text } } : {}),
+      ...(cur ? { currentAgenda: cur.title } : {}),
+    }, this.state.lastThoughtKey);
+    if (!thought || thought.key === this.state.lastThoughtKey) return;
+    this.state.lastThoughtKey = thought.key;
+    this.mind('thought', thought.text, {
+      action: thought.action,
+      salience: thought.salience,
+      source: thought.source,
+      ...thought.refs,
+    });
+    if (mode === 'act') this.actOnThought(thought, p);
+    this.save(true);
+  }
+
+  /** 只做自己世界内、可逆的动作；contact 先不自动执行，避免绕过主动闸门。 */
+  private actOnThought(thought: Thought, p: LocalParts): void {
+    if (thought.action === 'journal') {
+      const hasJournal = readJournal(this.dataDir, 500)
+        .some((entry) => entry.ts.slice(0, 10) === p.date);
+      if (!hasJournal) {
+        appendJournal(this.dataDir, {
+          ts: new Date().toISOString(),
+          kind: 'thought',
+          text: `【自己想的】${thought.text}`,
+        });
+        this.mind('memory', '按念头写了一笔日记');
+      }
+    } else if (thought.action === 'rest' && thought.salience >= 0.7) {
+      this.state.activity = '打盹';
+      this.state.location = '床';
+      this.snapshot?.invalidate();
+      this.mind('memory', '按念头去休息了');
     }
   }
 

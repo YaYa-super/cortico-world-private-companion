@@ -51,6 +51,10 @@ export interface CompanionState {
   musingDay: string;
   musingCount: number;
   lastMusingAt: string | null;
+  /** 上次背景念头时间（ISO）。 */
+  lastCognitionAt: string;
+  /** 上一条已记录的念头 key，避免同一条反复刷屏。 */
+  lastThoughtKey: string;
   /** 上次结算时间（ISO）。 */
   updatedAt: string;
   /** 下一次允许主动开口的时刻（ISO）；null 表示还没排。 */
@@ -186,6 +190,8 @@ export function createInitialState(now: Date, tz: string, cfg: CompanionConfig):
     musingDay: '',
     musingCount: 0,
     lastMusingAt: null,
+    lastCognitionAt: '',
+    lastThoughtKey: '',
     updatedAt: now.toISOString(),
     proactiveDueAt: null,
     proactiveCount: 0,

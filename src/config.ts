@@ -53,6 +53,10 @@ export interface CompanionConfig {
   mergeSimilarity: number;
   /** 心理活动日志级别：off 关闭，summary 只记决策摘要。 */
   mindLogLevel: 'off' | 'summary';
+  /** 背景念头：off 关闭；shadow 只记念头；act 允许写日记/休息（不主动发消息）。 */
+  cognitionMode: 'off' | 'shadow' | 'act';
+  /** 两次背景念头之间的最小间隔（分钟）。 */
+  cognitionIntervalMin: number;
   /** 追加到环境提示词里的个人风格补充。 */
   styleNote: string;
 }
@@ -83,6 +87,8 @@ export const COMPANION_DEFAULTS: CompanionConfig = {
   mergeEnabled: true,
   mergeSimilarity: 0.5,
   mindLogLevel: 'summary',
+  cognitionMode: 'off',
+  cognitionIntervalMin: 10,
   styleNote: '',
 };
 
@@ -278,6 +284,21 @@ export const COMPANION_CONFIG_GROUP: CompanionConfigGroup = {
         title: '心理活动日志',
         description: '记录主动开口/回声/记忆写入/夜间整理等决策，只给面板看，不进模型上下文；off 关闭。',
         enum: ['off', 'summary'],
+        'x-hot': true,
+      },
+      'worlds.companion.cognitionMode': {
+        type: 'string',
+        title: '背景念头',
+        description: 'off 关闭；shadow 只记「此刻想到了什么」；act 允许按念头写日记/休息，不主动发消息。',
+        enum: ['off', 'shadow', 'act'],
+        'x-hot': true,
+      },
+      'worlds.companion.cognitionIntervalMin': {
+        type: 'number',
+        title: '念头间隔（分钟）',
+        description: '两次背景念头之间至少隔多久；默认 10 分钟。',
+        minimum: 1,
+        maximum: 60,
         'x-hot': true,
       },
       'worlds.companion.styleNote': {

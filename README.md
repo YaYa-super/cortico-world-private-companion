@@ -91,6 +91,8 @@ node "D:\Coopanion\resources\app\node_modules\pnpm\bin\pnpm.cjs" install --no-fr
 | `mergeEnabled` | true | 夜间是否合并相似经历（合并式遗忘） |
 | `mergeSimilarity` | 0.5 | 合并相似度阈值（0.3 激进 / 0.9 保守） |
 | `mindLogLevel` | summary | 心理活动日志：off 关闭 / summary 只记决策 |
+| `cognitionMode` | off | 背景念头：off / shadow 只记念头 / act 允许写日记、休息（不自动发消息） |
+| `cognitionIntervalMin` | 10 | 两次背景念头的最小间隔（分钟） |
 | 夜间补跑 | 自动 | 03:30 错过时 08:00 后补跑；archive-only 不记完成，30 分钟退避重试 |
 | `styleNote` | 空 | 追加到环境提示词末尾的风格补充 |
 
@@ -129,7 +131,7 @@ World 页新增「记忆」面板（`src/webui/client.js`）：
 ## 开发
 
 ```bash
-node --test            # 57 个用例：时区/状态/主动/记忆库（损坏恢复、去重、检索、隔离区、导出 scope、裁剪、事件过滤、情绪/复习/合并/musing）
+node --test            # 61 个用例：时区/状态/主动/记忆库（损坏恢复、去重、检索、隔离区、导出 scope、裁剪、事件过滤、情绪/复习/合并/musing）
 node tools/import-memory-extra.mjs --dry   # 预览从旧记忆库能导多少
 node tools/eval-memory.mjs                 # 32 问记忆评测：recall@3 / 纯度 / p95
 node tools/eval-persona.mjs                # 6 问人格卡评测（CONSTITUTION）
