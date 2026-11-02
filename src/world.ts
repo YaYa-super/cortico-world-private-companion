@@ -22,7 +22,7 @@ import { TOOL_SPECS } from './tools.ts';
 import { evaluate, reasonFor } from './proactive.ts';
 import { SnapshotPusher } from './snapshot.ts';
 import { detectEmotion, relatedWords } from './emotion.ts';
-import { makeIntention, scoreThought, textSimilarity, think, type Intention, type Thought } from './cognition.ts';
+import { makeIntention, scoreThought, think, type Intention, type Thought } from './cognition.ts';
 import { MindLog, type MindType } from './mind.ts';
 import { MEMORY_KINDS, MemoryStore, scopeKey, type MemoryKind, type MemoryRecord } from './memory-store.ts';
 import { isHumanEvent, scopeOfEvent } from './event-filter.ts';
@@ -36,6 +36,8 @@ import { formatLocal, hmToMinutes, humanSpan, inWindow, localParts } from './tim
 
 const ENV_PROMPT_FILE = fileURLToPath(new URL('../ENV_PROMPT.md', import.meta.url));
 const TICK_MS = 60_000;
+/** 两次主动之间的最小间隔（反连续打扰；不是排程计时器）。 */
+const CONTACT_GAP_MS = 30 * 60_000;
 /** 换行常量：避免补丁脚本把 \n 转义弄丢。 */
 const NL = String.fromCharCode(10);
 const SAVE_EVERY_MS = 20_000;
@@ -137,7 +139,7 @@ export class CompanionWorld implements World {
     const cfg = this.cfg();
     const count = this.countToday();
     const gates = cfg.proactiveEnabled
-      ? `主动联系：开启。免打扰 ${cfg.quietStart}-${cfg.quietEnd}；两次之间至少 ${cfg.proactiveMinGapMin} 分钟；每天最多 ${cfg.proactiveDailyCap || '不限'} 次（今天已 ${count} 次）。`
+      ? `主动联系：开启。由生活/状态事件触发，同一由头 6 小时内不重复；免打扰 ${cfg.quietStart}-${cfg.quietEnd}；每天最多 ${cfg.proactiveDailyCap || '不限'} 次（今天已 ${count} 次）。`
       : '主动联系：关闭（只在对方开口时回应，不主动找人）。';
     return {
       'companion.gates': gates,
@@ -581,7 +583,7 @@ export class CompanionWorld implements World {
 
   /** 节日：每天一次；失败回退固定公历节日。 */
   private async refreshHolidays(now: Date): Promise<void> {
-    if (!this.cfg().holidayEnabled) return;
+    if (!this.cfg().proactiveEnabled || !this.cfg().holidayEnabled) return;
     const p = localParts(now, this.tz());
     if (this.state.lastHolidayAt && formatLocal(this.state.lastHolidayAt, this.tz()).slice(0, 10) === p.date) return;
     this.state.lastHolidayAt = now.toISOString();
@@ -590,8 +592,8 @@ export class CompanionWorld implements World {
       this.state.holidays = await fetchHolidays(year);
       this.save(true);
     } catch (error) {
-      this.state.holidays = fixedHolidays(year);
-      this.host?.log.warn('[companion] 节日查询失败，回退固定节日', String(error));
+      this.state.holidays = { ...fixedHolidays(year), ...(this.state.holidays ?? {}) };
+      this.host?.log.warn('[companion] 节日查询失败，保留旧表并补固定节日', String(error));
       this.save(true);
     }
   }
@@ -600,7 +602,7 @@ export class CompanionWorld implements World {
   private async refreshWeather(now: Date): Promise<void> {
     const cfg = this.cfg();
     const city = (cfg.weatherCity ?? '').trim();
-    if (!cfg.weatherEnabled || !city || this.weatherInFlight) return;
+    if (!cfg.proactiveEnabled || !cfg.weatherEnabled || !city || this.weatherInFlight) return;
     const last = Date.parse(this.state.lastWeatherAt ?? '');
     if (Number.isFinite(last) && now.getTime() - last < 30 * 60_000) return;
     this.weatherInFlight = true;
@@ -608,7 +610,12 @@ export class CompanionWorld implements World {
     this.save(true);
     try {
       const current = await fetchWeather(city, now);
-      const previous = this.state.weather;
+      const previousAt = Date.parse(this.state.weather?.at ?? '');
+      const sameCity = this.state.weather?.city === current.city;
+      const previous = sameCity && Number.isFinite(previousAt)
+        && now.getTime() - previousAt <= 2 * 3_600_000
+        ? this.state.weather
+        : null;
       this.state.weather = current;
       this.save(true);
       if (this.state.pendingTrigger) return;
@@ -617,7 +624,8 @@ export class CompanionWorld implements World {
       if (!trigger) return;
       const seen = this.state.triggerSeen ?? {};
       const lastTrigger = Date.parse(seen[trigger.key] ?? '');
-      if (Number.isFinite(lastTrigger) && now.getTime() - lastTrigger < 6 * 3_600_000) return;
+      const cooldown = /:(heat|cold):/.test(trigger.key) ? 20 * 3_600_000 : 6 * 3_600_000;
+      if (Number.isFinite(lastTrigger) && now.getTime() - lastTrigger < cooldown) return;
       this.state.pendingTrigger = {
         ...trigger,
         at: now.toISOString(),
@@ -647,15 +655,18 @@ export class CompanionWorld implements World {
    */
   private scheduleProactiveTriggers(now: Date): void {
     const cfg = this.cfg();
-    if (!cfg.proactiveEnabled) return;
     const p = localParts(now, this.tz());
     const cur = currentItem(this.state.agenda, p.minutes);
     const agendaKey = cur ? `${cur.time}:${cur.title}` : '';
     const prevAgenda = this.state.lastAgendaKey;
     const prevSleeping = this.state.lastSleeping;
-    // 先推进基线，即使有 pending trigger 也不能漏掉这一拍的日程/睡眠变化。
+    // 先推进基线，即使关闭/有 pending trigger 也不能漏掉日程/睡眠变化。
     this.state.lastAgendaKey = agendaKey;
     this.state.lastSleeping = this.state.sleeping;
+    if (!cfg.proactiveEnabled) {
+      this.state.pendingTrigger = null;
+      return;
+    }
     const pending = this.state.pendingTrigger;
     if (pending) {
       const at = Date.parse(pending.at);
@@ -706,9 +717,10 @@ export class CompanionWorld implements World {
     if (this.state.energy >= 80 && this.state.mood >= 75) {
       push('body:high', '今天状态很好，想把这点好心情分他一点。', 'body', 0.55);
     }
-    const holiday = this.state.holidays?.[p.date];
+    const holiday = cfg.holidayEnabled ? this.state.holidays?.[p.date] : undefined;
     if (holiday) {
-      push(`holiday:${p.date}`, `今天是${holiday}。`, 'social', 0.82);
+      const safe = String(holiday).replace(/[ -]/g, '').slice(0, 20);
+      if (safe) push(`holiday:${p.date}`, `今天是${safe}。`, 'social', 0.82);
     }
     const todayMonthDay = p.date.slice(5);
     const year = Number(p.date.slice(0, 4));
@@ -929,6 +941,11 @@ export class CompanionWorld implements World {
     if (!Number.isFinite(last)) return;
     // 已经处理过的老回复不重复 save；只有仍在等待、还有未回应计数或 pending
     // 话头时才需要再看一次用户是否回复。
+    // 24 小时没有新联系也没有回复：未回应计数自然衰减，不能永久停摆。
+    if ((this.state.cognitionUnanswered ?? 0) > 0 && now.getTime() - last > 24 * 3_600_000) {
+      this.state.cognitionUnanswered = 0;
+      this.save(true);
+    }
     if (!this.state.cognitionAwaitingReply && !this.state.cognitionUnanswered
       && !this.state.pendingFollowupThreadId) return;
     const lastUser = this.probeLastUser(now.getTime());
@@ -985,11 +1002,13 @@ export class CompanionWorld implements World {
       countToday: this.countToday(),
     });
     if (!gate.ok) return { ok: false, reason: gate.blockedBy };
+    const lastSent = Date.parse(this.state.lastProactiveAt ?? '');
+    if (Number.isFinite(lastSent) && now.getTime() - lastSent < CONTACT_GAP_MS) {
+      return { ok: false, reason: '刚联系过，先隔一会儿' };
+    }
     if ((this.state.cognitionUnanswered ?? 0) >= 2) return { ok: false, reason: '连续未回应，先降速' };
     const cur = currentItem(this.state.agenda, p.minutes);
     if (cur && /开会|上课|工作|忙|面试|考试/.test(cur.title)) return { ok: false, reason: '当前日程繁忙' };
-    const lastText = this.state.lastCognitionContactText ?? '';
-    if (lastText && textSimilarity(lastText, intention.text) >= 0.7) return { ok: false, reason: '和上次太像，避免重复' };
 
     const text = `【自己的念头】${intention.text}
 这是你自己想到的，可以自然地说一句，也可以不说。`;
@@ -1333,8 +1352,15 @@ export class CompanionWorld implements World {
         this.lastMindGate = gate.code;
         this.mind('gate', `没开口：${gate.blockedBy}`, { code: gate.code });
       }
+      if (gate.code === 'sleep' || gate.code === 'quiet' || gate.code === 'cap') {
+        // 保留 triggerSeen 冷却，避免同一事件下一拍又生成、再被同一闸门挡住。
+        this.state.pendingTrigger = null;
+        this.save(true);
+      }
       return false;
     }
+    const lastSent = Date.parse(this.state.lastProactiveAt ?? '');
+    if (Number.isFinite(lastSent) && now.getTime() - lastSent < CONTACT_GAP_MS) return false;
     const sinceTalkMs = lastUserAt ? now.getTime() - lastUserAt : null;
     const reason = trigger.reason;
     const text = buildProactiveText({
@@ -1372,16 +1398,8 @@ export class CompanionWorld implements World {
       return false;
     }
     if ((this.state.cognitionUnanswered ?? 0) >= 2) {
-      this.mind('review', '连续未回应，主动降速', { score, unanswered: this.state.cognitionUnanswered });
-      clear();
-      this.save(true);
-      return false;
-    }
-    if (this.state.lastCognitionContactText
-      && textSimilarity(this.state.lastCognitionContactText, reason) >= 0.7) {
-      this.mind('review', '和上次主动太像，暂缓', { score });
-      clear();
-      this.save(true);
+      this.mind('review', '连续未回应，先不打扰；24 小时后再评估', { score, unanswered: this.state.cognitionUnanswered });
+      // 不丢 pending，也不清 triggerSeen；等用户回复或 24h 自动恢复。
       return false;
     }
     if (score < 0.55) {
@@ -1965,7 +1983,7 @@ export class CompanionWorld implements World {
     }
     const gate = evaluate({
       cfg: this.cfg(),
-      state: this.state,
+      state: { ...this.state, proactiveDueAt: null },
       now,
       tz: this.tz(),
       lastUserAt: this.probeLastUser(now.getTime()),

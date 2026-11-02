@@ -61,7 +61,8 @@ export function weatherTrigger(prev: WeatherSnapshot | null, current: WeatherSna
       salience: 0.72,
     };
   }
-  if (current.temperature >= 35) {
+  if (current.temperature >= 35 && (!prev || prev.temperature < 35)
+    && hour >= 9 && hour < 21) {
     return {
       key: `weather:heat:${date}`,
       reason: '今天很热，想提醒他别在外面晒太久。',
@@ -69,7 +70,8 @@ export function weatherTrigger(prev: WeatherSnapshot | null, current: WeatherSna
       salience: 0.62,
     };
   }
-  if (current.temperature <= 0) {
+  if (current.temperature <= 0 && (!prev || prev.temperature > 0)
+    && (hour >= 7 || hour < 22)) {
     return {
       key: `weather:cold:${date}`,
       reason: '今天很冷，想提醒他多穿一点。',
@@ -170,13 +172,17 @@ export async function fetchWeather(city: string, now = new Date()): Promise<Weat
     precipitation: typeof c.precipitation === 'number' ? c.precipitation : 0,
     weatherCode: c.weather_code,
     windSpeed: typeof c.wind_speed_10m === 'number' ? c.wind_speed_10m : 0,
-    ...(data.daily && Array.isArray(data.daily.weather_code) && data.daily.weather_code.length > 1
+    ...(data.daily
+      && typeof data.daily.weather_code?.[1] === 'number'
+      && typeof data.daily.temperature_2m_max?.[1] === 'number'
+      && typeof data.daily.temperature_2m_min?.[1] === 'number'
+      && typeof data.daily.precipitation_probability_max?.[1] === 'number'
       ? {
         tomorrow: {
-          weatherCode: Number(data.daily.weather_code[1]) || 0,
-          tempMax: Number(data.daily.temperature_2m_max?.[1]) || 0,
-          tempMin: Number(data.daily.temperature_2m_min?.[1]) || 0,
-          precipProb: Number(data.daily.precipitation_probability_max?.[1]) || 0,
+          weatherCode: data.daily.weather_code[1],
+          tempMax: data.daily.temperature_2m_max[1],
+          tempMin: data.daily.temperature_2m_min[1],
+          precipProb: data.daily.precipitation_probability_max[1],
         },
       }
       : {}),
