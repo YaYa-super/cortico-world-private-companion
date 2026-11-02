@@ -22,7 +22,7 @@ import { TOOL_SPECS } from './tools.ts';
 import { evaluate, reasonFor } from './proactive.ts';
 import { SnapshotPusher } from './snapshot.ts';
 import { detectEmotion, relatedWords } from './emotion.ts';
-import { makeIntention, think, type Thought } from './cognition.ts';
+import { makeIntention, scoreThought, textSimilarity, think, type Intention, type Thought } from './cognition.ts';
 import { MindLog, type MindType } from './mind.ts';
 import { MEMORY_KINDS, MemoryStore, scopeKey, type MemoryKind, type MemoryRecord } from './memory-store.ts';
 import { isHumanEvent, scopeOfEvent } from './event-filter.ts';
@@ -312,6 +312,11 @@ export class CompanionWorld implements World {
         musingCap: Number.isFinite(this.cfg().musingDailyCap) ? this.cfg().musingDailyCap : 2,
         nextProactiveDue: this.state.proactiveDueAt,
         nextProactiveDueText: this.state.proactiveDueAt ? formatLocal(this.state.proactiveDueAt, this.tz()).slice(11, 16) : '',
+        cognitionMode: this.cfg().cognitionMode,
+        cognitionIntervalMin: this.cfg().cognitionIntervalMin,
+        cognitionContactMode: this.cfg().cognitionContactMode ?? 'hold',
+        cognitionUnanswered: this.state.cognitionUnanswered ?? 0,
+        pendingIntentions: (this.state.intentions ?? []).filter((intention) => intention.status === 'pending').length,
         mindLogLevel: this.cfg().mindLogLevel ?? 'summary',
       };
     }
@@ -513,8 +518,9 @@ export class CompanionWorld implements World {
       await this.pushContext();
       const woke = await this.maybeProactive(now);
       if (!woke) await this.maybeMuse(now);
+      this.refreshCognitionFeedback(now);
       this.scheduleCognition(now);
-      this.processIntentions(now);
+      await this.processIntentions(now);
     } catch (error) {
       this.host?.log.warn('[companion] tick 失败', String(error));
     } finally {
@@ -614,22 +620,34 @@ export class CompanionWorld implements World {
       Object.entries({ ...seen, [thought.key]: now.toISOString() })
         .filter(([, ts]) => Date.parse(ts) > now.getTime() - 7 * 86_400_000),
     );
+    const busy = /开会|上课|工作|忙|面试|考试/.test(cur?.title ?? '');
+    const score = scoreThought(thought, {
+      unanswered: this.state.cognitionUnanswered ?? 0,
+      busy,
+    });
     this.mind('thought', thought.text, {
       action: thought.action,
       salience: thought.salience,
+      score,
       source: thought.source,
       ...thought.refs,
     });
-    if (mode === 'act' && thought.action !== 'silent' && thought.salience >= 0.4) {
+    this.mind('candidate', `${score >= 0.45 ? '保留' : '丢弃'}：${thought.text}`, {
+      score,
+      action: thought.action,
+      source: thought.source,
+      ...(busy ? { gate: 'busy' } : {}),
+    });
+    if (mode === 'act' && thought.action !== 'silent' && score >= 0.45) {
       const intentions = this.state.intentions ?? [];
       if (!intentions.some((intention) => intention.key === thought.key && intention.status === 'pending')) {
-        const intention = makeIntention(thought, now);
+        const intention = makeIntention(thought, now, score);
         this.state.intentions = [...intentions, intention].slice(-20);
         this.mind('intention', `想${thought.action === 'contact' ? '找他' : thought.action === 'journal' ? '写下来' : '去休息'}：${thought.text}`, {
           intentionId: intention.id,
           dueAt: intention.dueAt,
           action: intention.action,
-          salience: intention.salience,
+          score,
         });
       }
     }
@@ -637,7 +655,7 @@ export class CompanionWorld implements World {
   }
 
   /** 处理到期的意图；contact 只 hold，不自动发消息。 */
-  private processIntentions(now: Date): void {
+  private async processIntentions(now: Date): Promise<void> {
     if (this.cfg().cognitionMode !== 'act') return;
     const intentions = this.state.intentions ?? [];
     if (!intentions.length) return;
@@ -671,11 +689,14 @@ export class CompanionWorld implements World {
         intention.status = 'done';
         changed = true;
       } else if (intention.action === 'contact') {
-        this.mind('intention', `想找他，但先放在心里：${intention.text.slice(0, 60)}`, {
+        const review = await this.reviewAndSendContact(intention, now, p);
+        intention.status = review.ok ? 'done' : 'held';
+        this.mind('review', `${review.ok ? '联系放行' : '联系暂缓'}：${review.reason}`, {
           intentionId: intention.id,
-          action: 'held',
+          action: intention.action,
+          ok: review.ok ? 1 : 0,
+          ...(review.reason ? { reason: review.reason } : {}),
         });
-        intention.status = 'held';
         changed = true;
       }
     }
@@ -692,6 +713,80 @@ export class CompanionWorld implements World {
       this.state.intentions = intentions.slice(-20);
       this.save(true);
     }
+  }
+
+  /** 实验性：未回应降速 / 用户回复后的 follow-up 审计。 */
+  private refreshCognitionFeedback(now: Date): void {
+    if (!this.state.cognitionAwaitingReply || !this.state.lastCognitionContactAt) return;
+    const last = Date.parse(this.state.lastCognitionContactAt);
+    if (!Number.isFinite(last)) return;
+    const lastUser = this.probeLastUser(now.getTime());
+    if (lastUser && lastUser > last) {
+      this.state.cognitionAwaitingReply = false;
+      this.state.cognitionUnanswered = 0;
+      if (this.state.pendingFollowupThreadId) {
+        this.state.followupReviewThreadId = this.state.pendingFollowupThreadId;
+        this.state.followupReviewAt = now.toISOString();
+        this.mind('followup', '用户回复了，待复核话头', {
+          threadId: this.state.pendingFollowupThreadId,
+          since: this.state.pendingFollowupAt,
+        });
+        this.state.pendingFollowupThreadId = '';
+        this.state.pendingFollowupAt = '';
+      }
+      this.save(true);
+    } else if (now.getTime() - last > 3 * 3_600_000) {
+      this.state.cognitionAwaitingReply = false;
+      this.state.cognitionUnanswered = Math.min(3, (this.state.cognitionUnanswered ?? 0) + 1);
+      this.mind('review', `上次联系后 ${Math.round((now.getTime() - last) / 3_600_000)} 小时没回复，降速`, {
+        unanswered: this.state.cognitionUnanswered,
+      });
+      this.save(true);
+    }
+  }
+
+  /** 实验性：发送前复核；默认 hold，不发送。 */
+  private async reviewAndSendContact(
+    intention: Intention,
+    now: Date,
+    p: LocalParts,
+  ): Promise<{ ok: boolean; reason: string }> {
+    const cfg = this.cfg();
+    if (cfg.cognitionContactMode !== 'send') return { ok: false, reason: 'hold 模式，只放在心里' };
+    if (!cfg.proactiveEnabled) return { ok: false, reason: '主动联系已关闭' };
+    const gate = evaluate({
+      cfg,
+      state: this.state,
+      now,
+      tz: this.tz(),
+      lastUserAt: this.probeLastUser(now.getTime()),
+      countToday: this.countToday(),
+    });
+    if (!gate.ok) return { ok: false, reason: gate.blockedBy };
+    if ((this.state.cognitionUnanswered ?? 0) >= 2) return { ok: false, reason: '连续未回应，先降速' };
+    const cur = currentItem(this.state.agenda, p.minutes);
+    if (cur && /开会|上课|工作|忙|面试|考试/.test(cur.title)) return { ok: false, reason: '当前日程繁忙' };
+    const lastText = this.state.lastCognitionContactText ?? '';
+    if (lastText && textSimilarity(lastText, intention.text) >= 0.7) return { ok: false, reason: '和上次太像，避免重复' };
+
+    const text = `【自己的念头】${intention.text}
+这是你自己想到的，可以自然地说一句，也可以不说。`;
+    const pushed = await this.push('companion.proactive', text, 'flush');
+    if (!pushed?.delivered) return { ok: false, reason: '未投递，稍后再说' };
+    this.state.proactiveCount += 1;
+    this.state.proactiveDay = p.date;
+    this.state.lastProactiveAt = now.toISOString();
+    this.state.lastProactiveReason = `认知念头：${intention.text.slice(0, 40)}`;
+    this.state.lastCognitionContactAt = now.toISOString();
+    this.state.lastCognitionContactText = intention.text;
+    this.state.cognitionAwaitingReply = true;
+    if (intention.refs?.threadId) {
+      this.state.pendingFollowupThreadId = String(intention.refs.threadId);
+      this.state.pendingFollowupAt = now.toISOString();
+    }
+    this.snapshot?.invalidate();
+    this.save(true);
+    return { ok: true, reason: '已放行' };
   }
 
   private countToday(): number {
@@ -1037,6 +1132,62 @@ export class CompanionWorld implements World {
       quiet: `${cfg.quietStart}-${cfg.quietEnd}`,
       sinceTalk: sinceTalkMs === null ? '记不清了' : humanSpan(sinceTalkMs),
     });
+    // P0：候选评分 / 繁忙闸门 / 未回应降速 / 发送前重复复核。
+    const cur = currentItem(this.state.agenda, p.minutes);
+    const busy = /开会|上课|工作|忙|面试|考试/.test(cur?.title ?? '');
+    const candidate = {
+      key: memory ? `memory:${memory.threadId ?? memory.episodeId ?? 'reason'}` : 'state:reason',
+      text: reason,
+      salience: memory ? 0.9 : 0.6,
+      action: 'contact' as const,
+      source: memory ? 'memory' : 'agenda',
+    };
+    const score = scoreThought(candidate, {
+      unanswered: this.state.cognitionUnanswered ?? 0,
+      busy,
+    });
+    this.mind('candidate', `${score >= 0.55 ? '保留' : '暂缓'}：${reason}`, {
+      score,
+      action: 'contact',
+      source: candidate.source,
+      ...(busy ? { gate: 'busy' } : {}),
+    });
+    if (busy) {
+      this.mind('review', '当前日程繁忙，暂缓联系', { score, gate: 'busy' });
+      this.state.proactiveDueAt = nextDueAt(now, cfg, now.getTime());
+      this.save(true);
+      return false;
+    }
+    if ((this.state.cognitionUnanswered ?? 0) >= 2) {
+      this.mind('review', '连续未回应，主动降速', { score, unanswered: this.state.cognitionUnanswered });
+      this.state.proactiveDueAt = nextDueAt(now, cfg, now.getTime());
+      this.save(true);
+      return false;
+    }
+    if (this.state.lastCognitionContactText
+      && textSimilarity(this.state.lastCognitionContactText, reason) >= 0.7) {
+      this.mind('review', '和上次主动太像，暂缓', { score });
+      this.state.proactiveDueAt = nextDueAt(now, cfg, now.getTime());
+      this.save(true);
+      return false;
+    }
+    if (score < 0.55) {
+      this.mind('review', `候选价值不足（${score}），先不联系`, { score });
+      this.state.proactiveDueAt = nextDueAt(now, cfg, now.getTime());
+      this.save(true);
+      return false;
+    }
+    // P1：低精力时优先做自己的事（休息），而不是硬聊。
+    if (this.state.energy < 20 && !memory) {
+      this.state.activity = '打盹';
+      this.state.location = '床';
+      this.state.proactiveDueAt = nextDueAt(now, cfg, now.getTime());
+      this.mind('action', '精力太低，先去休息而不是找人', { score, action: 'rest' });
+      this.snapshot?.invalidate();
+      this.save(true);
+      return true;
+    }
+
     const withEvidence = memory ? `${text}${NL}记忆线索（只是素材，不一定说出来）：${memory.evidence}` : text;
     const pushed = await this.push('companion.proactive', withEvidence, 'flush');
     if (!pushed?.delivered) {
@@ -1050,8 +1201,11 @@ export class CompanionWorld implements World {
       ...(memory?.threadId ? { threadId: memory.threadId } : {}),
       ...(memory?.episodeId ? { memoryId: memory.episodeId } : {}),
     });
+    this.mind('action', '按主动候选开口', { score, action: 'contact' });
     if (memory?.threadId) {
       this.state.surfacedThreads = { ...(this.state.surfacedThreads ?? {}), [memory.threadId]: now.toISOString() };
+      this.state.pendingFollowupThreadId = memory.threadId;
+      this.state.pendingFollowupAt = now.toISOString();
     }
     if (memory?.episodeId) {
       this.state.surfacedMemories = { ...(this.state.surfacedMemories ?? {}), [memory.episodeId]: now.toISOString() };
@@ -1060,6 +1214,9 @@ export class CompanionWorld implements World {
     this.state.proactiveDay = p.date;
     this.state.lastProactiveAt = now.toISOString();
     this.state.lastProactiveReason = reason;
+    this.state.lastCognitionContactAt = now.toISOString();
+    this.state.lastCognitionContactText = reason;
+    this.state.cognitionAwaitingReply = true;
     this.state.proactiveDueAt = nextDueAt(now, cfg, now.getTime());
     this.save(true);
     return true;
@@ -1382,6 +1539,7 @@ export class CompanionWorld implements World {
   private memoryDigest(): {
     rules: string[]; person?: string; working?: string; echo?: string;
     echoId?: string; echoEventId?: string; recent: string[];
+    followup?: string;
   } {
     if (!this.cfg().memoryEnabled) return { rules: [], recent: [] };
     const cfg = this.cfg();

@@ -53,10 +53,12 @@ export interface CompanionConfig {
   mergeSimilarity: number;
   /** 心理活动日志级别：off 关闭，summary 只记决策摘要。 */
   mindLogLevel: 'off' | 'summary';
-  /** 背景念头：off 关闭；shadow 只记念头；act 允许写日记/休息（不主动发消息）。 */
+  /** 实验性：背景念头。off 关闭；shadow 只记念头；act 允许写日记/休息。 */
   cognitionMode: 'off' | 'shadow' | 'act';
   /** 两次背景念头之间的最小间隔（分钟）。 */
   cognitionIntervalMin: number;
+  /** 实验性：contact 意图到期后 hold（默认，不发消息）或 send（过复核后发送）。 */
+  cognitionContactMode: 'hold' | 'send';
   /** 追加到环境提示词里的个人风格补充。 */
   styleNote: string;
 }
@@ -89,6 +91,7 @@ export const COMPANION_DEFAULTS: CompanionConfig = {
   mindLogLevel: 'summary',
   cognitionMode: 'off',
   cognitionIntervalMin: 10,
+  cognitionContactMode: 'hold',
   styleNote: '',
 };
 
@@ -288,17 +291,24 @@ export const COMPANION_CONFIG_GROUP: CompanionConfigGroup = {
       },
       'worlds.companion.cognitionMode': {
         type: 'string',
-        title: '背景念头',
-        description: 'off 关闭；shadow 只记「此刻想到了什么」；act 允许按念头写日记/休息，不主动发消息。',
+        title: '实验性：背景念头 → 意图',
+        description: '默认 off。shadow 只记录“她此刻想到了什么”；act 会按意图写日记/休息。实验功能，行为还不稳定。',
         enum: ['off', 'shadow', 'act'],
         'x-hot': true,
       },
       'worlds.companion.cognitionIntervalMin': {
         type: 'number',
-        title: '念头间隔（分钟）',
+        title: '实验性：念头间隔（分钟）',
         description: '两次背景念头之间至少隔多久；默认 10 分钟。',
         minimum: 1,
         maximum: 60,
+        'x-hot': true,
+      },
+      'worlds.companion.cognitionContactMode': {
+        type: 'string',
+        title: '实验性：意图联系',
+        description: 'hold 只把“想找他”放在心里（默认）；send 才会过免打扰/额度/未回应/发送前复核后真的推送。',
+        enum: ['hold', 'send'],
         'x-hot': true,
       },
       'worlds.companion.styleNote': {

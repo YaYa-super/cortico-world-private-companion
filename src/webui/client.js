@@ -4,6 +4,13 @@
  */
 const ZH = {
   title: '记忆',
+  experimental: '实验性：念头 → 意图',
+  experimentalDesc: '默认关闭。shadow 只记录“此刻想到了什么”；act 会按意图写日记/休息；contact 默认只 hold，不主动发消息。实验功能，行为可能变化。',
+  cogMode: '模式',
+  cogInterval: '间隔（分钟）',
+  cogContact: '联系',
+  cogUnanswered: '连续未回应',
+  cogIntentions: '待落地意图',
   desc: '只读查看这套记忆：概览、检索、合并摘要。导入审核仍走 CLI，这里不批准导入。',
   overview: '概览',
   overviewDesc: '当前库里有什么，最近一次巩固/合并/反思是什么时候。',
@@ -48,6 +55,9 @@ const ZH = {
   typeProactive: '主动',
   typeGate: '未开口',
   typeThought: '念头',
+  typeCandidate: '候选',
+  typeReview: '复核',
+  typeFollowup: '跟进',
   typeIntention: '意图',
   typeAction: '行动',
   typeEcho: '回声',
@@ -82,6 +92,13 @@ const ZH = {
 
 const EN = {
   title: 'Memory',
+  experimental: 'Experimental: thought → intention',
+  experimentalDesc: 'Off by default. shadow only logs thoughts; act writes journal/rest from intentions; contact defaults to hold, never sends. Experimental; behavior may change.',
+  cogMode: 'Mode',
+  cogInterval: 'Interval (min)',
+  cogContact: 'Contact',
+  cogUnanswered: 'Unanswered',
+  cogIntentions: 'Pending intentions',
   desc: 'Read-only view of memory: overview, search and merge summaries. Import review stays in the CLI.',
   overview: 'Overview',
   overviewDesc: 'What is in the store, and when consolidation/merge/reflection last ran.',
@@ -126,6 +143,9 @@ const EN = {
   typeProactive: 'Proactive',
   typeGate: 'Skipped',
   typeThought: 'Thought',
+  typeCandidate: 'Candidate',
+  typeReview: 'Review',
+  typeFollowup: 'Follow-up',
   typeIntention: 'Intention',
   typeAction: 'Action',
   typeEcho: 'Echo',
@@ -169,6 +189,10 @@ export default {
         const message = ui.msgline();
         const facts = ui.h('div');
         const refresh = ui.button(S.refresh, { onClick: () => { void refreshAll(); } });
+        const experimental = ui.h('div');
+        const experimentalFacts = ui.h('div');
+        experimental.append(ui.section(S.experimental, S.experimentalDesc), experimentalFacts);
+
         const overview = ui.h('div');
         const overviewHead = ui.section(S.overview, S.overviewDesc);
         const overviewBar = ui.rowbar();
@@ -189,6 +213,9 @@ export default {
             { value: 'proactive', label: S.typeProactive },
             { value: 'gate', label: S.typeGate },
             { value: 'thought', label: S.typeThought },
+            { value: 'candidate', label: S.typeCandidate },
+            { value: 'review', label: S.typeReview },
+            { value: 'followup', label: S.typeFollowup },
             { value: 'intention', label: S.typeIntention },
             { value: 'action', label: S.typeAction },
             { value: 'echo', label: S.typeEcho },
@@ -217,7 +244,7 @@ export default {
         const mergeSection = ui.h('div');
         mergeSection.append(ui.section(S.merges, S.mergesDesc), mergeTable.el);
 
-        card.body.append(overview, nowSection, recentSection, mindSection, searchSection, mergeSection, message);
+        card.body.append(experimental, overview, nowSection, recentSection, mindSection, searchSection, mergeSection, message);
         root.append(card.el);
 
         function value(v) {
@@ -264,6 +291,17 @@ export default {
                 { k: S.surfaced, v: value(o.surfacedMemories) },
               ]),
               ui.kv([{ k: S.error, v: o.error || S.noError }]),
+            );
+            experimentalFacts.replaceChildren(
+              ui.kv([
+                { k: S.cogMode, v: value(o.cognitionMode) },
+                { k: S.cogInterval, v: value(o.cognitionIntervalMin) },
+                { k: S.cogContact, v: value(o.cognitionContactMode) },
+              ]),
+              ui.kv([
+                { k: S.cogUnanswered, v: value(o.cognitionUnanswered) },
+                { k: S.cogIntentions, v: value(o.pendingIntentions) },
+              ]),
             );
             nowFacts.replaceChildren(
               ui.kv([
@@ -335,6 +373,9 @@ export default {
               proactive: S.typeProactive,
               gate: S.typeGate,
               thought: S.typeThought,
+              candidate: S.typeCandidate,
+              review: S.typeReview,
+              followup: S.typeFollowup,
               intention: S.typeIntention,
               action: S.typeAction,
               echo: S.typeEcho,

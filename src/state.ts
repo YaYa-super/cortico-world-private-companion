@@ -60,6 +60,17 @@ export interface CompanionState {
   thoughtSeen: Record<string, string>;
   /** 尚未落地的意图；只保留最近一小段。 */
   intentions: Intention[];
+  /** 实验性认知：上次真正联系的时间、未回应次数、是否在等回复。 */
+  lastCognitionContactAt: string;
+  cognitionUnanswered: number;
+  cognitionAwaitingReply: boolean;
+  lastCognitionContactText: string;
+  /** 实验性认知：最近一次联系涉及的话头，等用户回复后做 follow-up 复核。 */
+  pendingFollowupThreadId: string;
+  pendingFollowupAt: string;
+  /** 用户已回复、待模型复核的话头；只保留 24h，进上下文提醒模型更新/关闭。 */
+  followupReviewThreadId: string;
+  followupReviewAt: string;
   /** 上次结算时间（ISO）。 */
   updatedAt: string;
   /** 下一次允许主动开口的时刻（ISO）；null 表示还没排。 */
@@ -199,6 +210,14 @@ export function createInitialState(now: Date, tz: string, cfg: CompanionConfig):
     lastThoughtKey: '',
     thoughtSeen: {},
     intentions: [],
+    lastCognitionContactAt: '',
+    cognitionUnanswered: 0,
+    cognitionAwaitingReply: false,
+    lastCognitionContactText: '',
+    pendingFollowupThreadId: '',
+    pendingFollowupAt: '',
+    followupReviewThreadId: '',
+    followupReviewAt: '',
     updatedAt: now.toISOString(),
     proactiveDueAt: null,
     proactiveCount: 0,

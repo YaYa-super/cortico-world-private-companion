@@ -19,7 +19,7 @@ export interface ContextInput {
   cfg: CompanionConfig;
   tz: string;
   now: Date;
-  memory?: { rules: string[]; person?: string; working?: string; echo?: string; recent: string[] };
+  memory?: { rules: string[]; person?: string; working?: string; echo?: string; recent: string[]; followup?: string };
 }
 
 export function buildContextText(input: ContextInput): string {
@@ -38,6 +38,7 @@ export function buildContextText(input: ContextInput): string {
     if (input.memory.person) lines.push(input.memory.person);
     if (input.memory.working) lines.push(`今天：${input.memory.working}`);
     if (input.memory.echo) lines.push(`情绪回声（只是提示，不一定说）：${input.memory.echo}`);
+    if (input.memory.followup) lines.push(`待复核话头（判断完成/取消/更新，不要重复追问）：${input.memory.followup}`);
     if (input.memory.recent.length) lines.push(`最近：${input.memory.recent.map((n) => n.slice(0, 80)).join('；')}`);
   }
   if (input.journal.length) {
@@ -69,6 +70,7 @@ export function contextSignature(input: ContextInput): string {
     input.memory?.working ?? '',
     input.memory?.echo ?? '',
     input.memory?.recent.join('|') ?? '',
+    input.memory?.followup ?? '',
   ]);
 }
 

@@ -39,6 +39,7 @@ export interface Intention {
   action: ThoughtAction;
   source: string;
   salience: number;
+  score?: number;
   createdAt: string;
   dueAt: string;
   status: 'pending' | 'done' | 'held' | 'expired';
@@ -109,6 +110,24 @@ export function think(input: ThoughtInput, avoidKeys: string[] = []): Thought | 
     });
   }
 
+  if (input.hour >= 11 && input.hour < 13) {
+    push({
+      key: 'meal:lunch',
+      text: '到饭点了，有点饿；不一定要跟谁说。',
+      salience: 0.38,
+      action: 'silent',
+      source: 'body',
+    });
+  } else if (input.hour >= 17 && input.hour < 19) {
+    push({
+      key: 'meal:dinner',
+      text: '该吃晚饭了，先看看有什么。',
+      salience: 0.4,
+      action: 'silent',
+      source: 'body',
+    });
+  }
+
   if (input.mood < 40) {
     push({
       key: 'mood:low',
@@ -162,8 +181,36 @@ export function think(input: ThoughtInput, avoidKeys: string[] = []): Thought | 
   return out.find((thought) => !avoidKeys.includes(thought.key)) ?? null;
 }
 
+/** 候选评分：念头显著性 + 来源权重 - 未回应/繁忙惩罚。 */
+export function scoreThought(
+  thought: Thought,
+  input: { unanswered?: number; busy?: boolean } = {},
+): number {
+  const weights: Record<string, number> = { memory: 0.08, social: 0.04, body: 0.06, self: 0.04, agenda: 0 };
+  const base = thought.salience + (weights[thought.source] ?? 0);
+  const penalty = Math.min(0.4, Math.max(0, input.unanswered ?? 0) * 0.12)
+    + (input.busy ? 0.15 : 0);
+  return Math.min(1, Math.max(0, Number((base - penalty).toFixed(2))));
+}
+
+/** 粗相似度：用于发送前防重复，不追求语义。 */
+export function textSimilarity(a: string, b: string): number {
+  const grams = (text: string) => {
+    const clean = text.replace(/\s+/g, '').slice(0, 200);
+    const out = new Set<string>();
+    for (let i = 0; i < clean.length - 1; i += 1) out.add(clean.slice(i, i + 2));
+    return out;
+  };
+  const ga = grams(a);
+  const gb = grams(b);
+  if (!ga.size || !gb.size) return 0;
+  let inter = 0;
+  for (const gram of ga) if (gb.has(gram)) inter += 1;
+  return inter / (ga.size + gb.size - inter);
+}
+
 /** 把念头变成有到期时间的意图；silent 不形成意图。 */
-export function makeIntention(thought: Thought, now: Date): Intention {
+export function makeIntention(thought: Thought, now: Date, score?: number): Intention {
   const delay = thought.action === 'contact' ? 30 * 60_000
     : thought.action === 'journal' ? 5 * 60_000
       : 60_000;
@@ -174,6 +221,7 @@ export function makeIntention(thought: Thought, now: Date): Intention {
     action: thought.action,
     source: thought.source,
     salience: thought.salience,
+    ...(score === undefined ? {} : { score }),
     createdAt: now.toISOString(),
     dueAt: new Date(now.getTime() + delay).toISOString(),
     status: 'pending',

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { makeIntention, think } from '../src/cognition.ts';
+import { makeIntention, scoreThought, textSimilarity, think } from '../src/cognition.ts';
 
 const base = {
   now: new Date('2026-11-02T20:00:00+08:00'),
@@ -55,6 +55,19 @@ test('同一段记忆不会用两种说法反复出现', () => {
   };
   assert.equal(think(input)?.key, 'memory:e1');
   assert.equal(think(input, ['memory:e1']), null);
+});
+
+test('候选评分会被未回应和繁忙拉低', () => {
+  const thought = think({ ...base, threads: [{ id: 't1', text: '插件还没做完', what: '插件还没做完' }] });
+  assert.ok(thought);
+  const fresh = scoreThought(thought, { unanswered: 0, busy: false });
+  const tired = scoreThought(thought, { unanswered: 2, busy: true });
+  assert.ok(tired < fresh, `${tired} < ${fresh}`);
+});
+
+test('发送前相似度能识别重复措辞', () => {
+  assert.ok(textSimilarity('上次没说完的事：插件还没做完', '上次没说完的事：插件还没做完') > 0.9);
+  assert.ok(textSimilarity('今天累死了', '明天天气不错') < 0.2);
 });
 
 test('背景念头：没有明显念头时返回 null', () => {

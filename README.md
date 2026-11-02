@@ -93,6 +93,7 @@ node "D:\Coopanion\resources\app\node_modules\pnpm\bin\pnpm.cjs" install --no-fr
 | `mindLogLevel` | summary | 心理活动日志：off 关闭 / summary 只记决策 |
 | `cognitionMode` | off | 背景念头：off / shadow 只记念头 / act 允许写日记、休息（不自动发消息） |
 | `cognitionIntervalMin` | 10 | 两次背景念头的最小间隔（分钟） |
+| `cognitionContactMode` | hold | 实验性：contact 意图到期后 hold（只记）或 send（过复核后发送） |
 | 夜间补跑 | 自动 | 03:30 错过时 08:00 后补跑；archive-only 不记完成，30 分钟退避重试 |
 | `styleNote` | 空 | 追加到环境提示词末尾的风格补充 |
 
@@ -107,6 +108,18 @@ node "D:\Coopanion\resources\app\node_modules\pnpm\bin\pnpm.cjs" install --no-fr
 - `companion_memory` — 维护：`stats` / `export` / `import` / `prune` / `forget`（import 只读 `data/private-companion/imports/` 下的 `.json`）
 - `companion_consolidate` — 夜间整理：`plan` 取材料，`apply` 提交 0-6 条记录
 - `companion_proactive` — 检查现在会不会开口、被什么拦着；`trigger` 仅供测试
+
+## 主动策略（直接启用）
+
+除了实验性的「念头 → 意图」，日常 proactive 本身已经带 P0/P1 策略：
+
+- **候选评分**：由头/记忆证据先打分，低于阈值只记 `candidate/review`，不开口；
+- **未回应降速**：联系后 3 小时无回复，累计未回应，候选分数下降；连续 2 次未回应不再联系；
+- **发送前复核**：当前日程繁忙、和上次太像、连续未回应时暂缓；
+- **审计**：心理活动里能看到 `候选/复核/主动/行动`；
+- **follow-up**：主动联系涉及未完话头时，用户回复后把话头标成“待复核”注入上下文，让模型完成/取消/更新；
+- **动作选择**：精力太低时优先去休息，而不是硬聊；
+- **实验性认知**：`cognitionMode` 默认 off，配置页和记忆面板都标「实验性」，不影响上面的正常主动。
 
 ## 记忆面板
 
@@ -131,7 +144,7 @@ World 页新增「记忆」面板（`src/webui/client.js`）：
 ## 开发
 
 ```bash
-node --test            # 64 个用例：时区/状态/主动/记忆库（损坏恢复、去重、检索、隔离区、导出 scope、裁剪、事件过滤、情绪/复习/合并/musing）
+node --test            # 66 个用例：时区/状态/主动/记忆库（损坏恢复、去重、检索、隔离区、导出 scope、裁剪、事件过滤、情绪/复习/合并/musing）
 node tools/import-memory-extra.mjs --dry   # 预览从旧记忆库能导多少
 node tools/eval-memory.mjs                 # 32 问记忆评测：recall@3 / 纯度 / p95
 node tools/eval-persona.mjs                # 6 问人格卡评测（CONSTITUTION）
