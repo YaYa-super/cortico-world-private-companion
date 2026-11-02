@@ -91,6 +91,8 @@ node "D:\Coopanion\resources\app\node_modules\pnpm\bin\pnpm.cjs" install --no-fr
 | `mindLogLevel` | summary | 心理活动日志：off 关闭 / summary 只记决策 |
 | `cognitionMode` | off | 背景念头：off / shadow 只记念头 / act 允许写日记、休息（不自动发消息） |
 | `cognitionIntervalMin` | 10 | 两次背景念头的最小间隔（分钟） |
+| `weatherEnabled` | false | 开启天气触发（Open-Meteo，免费；需填城市） |
+| `weatherCity` | 空 | 天气城市名，例如「杭州」「北京」；留空不查询 |
 | `cognitionContactMode` | hold | 实验性：contact 意图到期后 hold（只记）或 send（过复核后发送） |
 | 夜间补跑 | 自动 | 03:30 错过时 08:00 后补跑；archive-only 不记完成，30 分钟退避重试 |
 | `styleNote` | 空 | 追加到环境提示词末尾的风格补充 |
@@ -113,7 +115,7 @@ node "D:\Coopanion\resources\app\node_modules\pnpm\bin\pnpm.cjs" install --no-fr
 除了实验性的「念头 → 意图」，日常 proactive 本身已经带 P0/P1 策略：
 
 - **候选评分**：由头/记忆证据先打分，低于阈值只记 `candidate/review`，不开口；
-- **候选触发**：日程节点、醒来、低精力/低心情、到期话头、生日、饭点、晚间锚点、长时间没说话、到期/临近话头、去年今天等事件/状态变化产生候选；**不再用 90 分钟 + 抖动计时器**；
+- **候选触发**：日程节点、醒来、低精力/低心情、到期话头、生日、饭点、晚间锚点、长时间没说话、到期/临近话头、去年今天、天气变化等事件/状态变化产生候选；**不再用 90 分钟 + 抖动计时器**；
 - **未回应降速**：联系后 3 小时无回复，累计未回应；连续 2 次未回应不再联系；
 - **发送前复核**：当前日程繁忙、和上次太像、连续未回应时暂缓；
 - **审计**：心理活动里能看到 `候选/复核/主动/行动`；
@@ -144,7 +146,7 @@ World 页新增「记忆」面板（`src/webui/client.js`）：
 ## 开发
 
 ```bash
-node --test            # 71 个用例：时区/状态/主动/记忆库（损坏恢复、去重、检索、隔离区、导出 scope、裁剪、事件过滤、情绪/复习/合并/musing）
+node --test            # 75 个用例：时区/状态/主动/记忆库（损坏恢复、去重、检索、隔离区、导出 scope、裁剪、事件过滤、情绪/复习/合并/musing）
 node tools/import-memory-extra.mjs --dry   # 预览从旧记忆库能导多少
 node tools/eval-memory.mjs                 # 32 问记忆评测：recall@3 / 纯度 / p95
 node tools/eval-persona.mjs                # 6 问人格卡评测（CONSTITUTION）

@@ -51,6 +51,10 @@ export interface CompanionConfig {
   mergeEnabled: boolean;
   /** 合并的相似度阈值（0.3-0.9，越高越保守）。 */
   mergeSimilarity: number;
+  /** 是否启用天气触发（Open-Meteo，免费，无需 key）。 */
+  weatherEnabled: boolean;
+  /** 天气城市名；空 = 不查询。 */
+  weatherCity: string;
   /** 心理活动日志级别：off 关闭，summary 只记决策摘要。 */
   mindLogLevel: 'off' | 'summary';
   /** 实验性：背景念头。off 关闭；shadow 只记念头；act 允许写日记/休息。 */
@@ -88,6 +92,8 @@ export const COMPANION_DEFAULTS: CompanionConfig = {
   musingDailyCap: 2,
   mergeEnabled: true,
   mergeSimilarity: 0.5,
+  weatherEnabled: false,
+  weatherCity: '',
   mindLogLevel: 'summary',
   cognitionMode: 'off',
   cognitionIntervalMin: 10,
@@ -271,6 +277,17 @@ export const COMPANION_CONFIG_GROUP: CompanionConfigGroup = {
         description: '记录主动开口/回声/记忆写入/夜间整理等决策，只给面板看，不进模型上下文；off 关闭。',
         enum: ['off', 'summary'],
         'x-hot': true,
+      },
+      'worlds.companion.weatherEnabled': {
+        type: 'boolean',
+        title: '天气触发',
+        description: '用 Open-Meteo 免费接口按城市查询当前天气；下雨/降温/高温/低温时产生候选。默认关闭，不填城市不会请求。',
+        'x-hot': true,
+      },
+      'worlds.companion.weatherCity': {
+        type: 'string',
+        title: '天气城市',
+        description: '例如「杭州」「北京」。只用于地理编码和天气查询；留空则不查询。',
       },
       'worlds.companion.cognitionMode': {
         type: 'string',

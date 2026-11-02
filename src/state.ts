@@ -6,6 +6,7 @@
  */
 import type { CompanionConfig } from './config.ts';
 import type { Intention } from './cognition.ts';
+import type { WeatherSnapshot } from './weather.ts';
 import { hmToMinutes, inWindow, localParts, minutesToHm, type LocalParts } from './time.ts';
 
 export interface PendingTrigger {
@@ -91,6 +92,9 @@ export interface CompanionState {
   /** 上一拍的日程 key / 睡眠状态，用于检测“刚开始/刚醒”。 */
   lastAgendaKey: string;
   lastSleeping: boolean;
+  /** 最近一次天气快照；没有启用/没查到为 null。 */
+  weather: WeatherSnapshot | null;
+  lastWeatherAt: string;
   /** 下一次允许主动开口的时刻（ISO）；null 表示还没排。 */
   proactiveDueAt: string | null;
   proactiveCount: number;
@@ -242,6 +246,8 @@ export function createInitialState(now: Date, tz: string, cfg: CompanionConfig):
     triggerSeen: {},
     lastAgendaKey: '',
     lastSleeping: false,
+    weather: null,
+    lastWeatherAt: '',
     proactiveDueAt: null,
     proactiveCount: 0,
     proactiveDay: p.date,

@@ -26,6 +26,7 @@ import { makeIntention, scoreThought, textSimilarity, think, type Intention, typ
 import { MindLog, type MindType } from './mind.ts';
 import { MEMORY_KINDS, MemoryStore, scopeKey, type MemoryKind, type MemoryRecord } from './memory-store.ts';
 import { isHumanEvent, scopeOfEvent } from './event-filter.ts';
+import { fetchWeather, weatherTrigger } from './weather.ts';
 import {
   MAIN_KEY, appendJournal, ensureDir, journalPath, readJournal, readJson, writeJsonAtomic,
   type JournalEntry, type Profile, type ProfileMap,
@@ -77,6 +78,7 @@ export class CompanionWorld implements World {
   private lastContextDelivered = false;
   private tickRunning = false;
   private tickPromise: Promise<void> | null = null;
+  private weatherInFlight = false;
   private pendingReviewIds: string[] = [];
 
   constructor(ctx: WorldContext<CompanionConfig>) {
@@ -519,6 +521,7 @@ export class CompanionWorld implements World {
       const now = new Date();
       // 先处理用户回复/未回应，再生成上下文，follow-up 才能赶上这一轮。
       this.refreshCognitionFeedback(now);
+      await this.refreshWeather(now);
       this.scheduleProactiveTriggers(now);
       await this.pushContext();
       const woke = await this.maybeProactive(now);
@@ -571,6 +574,51 @@ export class CompanionWorld implements World {
       this.memoryStore.markUsed([memory.echoId]);
       this.mind('echo', memory.echo ?? '情绪回声', { memoryId: memory.echoId });
       this.save(true);
+    }
+  }
+
+  /** 天气：Open-Meteo，30 分钟一次；失败只记日志，不影响主动。 */
+  private async refreshWeather(now: Date): Promise<void> {
+    const cfg = this.cfg();
+    const city = (cfg.weatherCity ?? '').trim();
+    if (!cfg.weatherEnabled || !city || this.weatherInFlight) return;
+    const last = Date.parse(this.state.lastWeatherAt ?? '');
+    if (Number.isFinite(last) && now.getTime() - last < 30 * 60_000) return;
+    this.weatherInFlight = true;
+    this.state.lastWeatherAt = now.toISOString();
+    this.save(true);
+    try {
+      const current = await fetchWeather(city, now);
+      const previous = this.state.weather;
+      this.state.weather = current;
+      this.save(true);
+      if (this.state.pendingTrigger) return;
+      const date = formatLocal(current.at, this.tz()).slice(0, 10);
+      const trigger = weatherTrigger(previous, current, date);
+      if (!trigger) return;
+      const seen = this.state.triggerSeen ?? {};
+      const lastTrigger = Date.parse(seen[trigger.key] ?? '');
+      if (Number.isFinite(lastTrigger) && now.getTime() - lastTrigger < 6 * 3_600_000) return;
+      this.state.pendingTrigger = {
+        ...trigger,
+        at: now.toISOString(),
+      };
+      this.state.triggerSeen = Object.fromEntries(
+        Object.entries({ ...seen, [trigger.key]: now.toISOString() })
+          .filter(([, ts]) => Date.parse(ts) > now.getTime() - 7 * 86_400_000)
+          .slice(-100),
+      );
+      this.state.proactiveDueAt = null;
+      this.mind('trigger', `天气触发：${trigger.reason}`, {
+        trigger: trigger.key,
+        source: 'weather',
+        salience: trigger.salience,
+      });
+      this.save(true);
+    } catch (error) {
+      this.host?.log.warn('[companion] 天气查询失败', String(error));
+    } finally {
+      this.weatherInFlight = false;
     }
   }
 
