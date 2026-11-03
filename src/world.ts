@@ -1563,10 +1563,10 @@ export class CompanionWorld implements World {
       return false;
     }
     this.lastMindGate = '';
-    this.mind('proactive', `开口：${reason}`, {
+    this.mind('proactive', `唤醒：${reason}`, {
       ...(trigger.threadId ? { threadId: trigger.threadId } : {}),
     });
-    this.mind('action', '按触发候选开口', { score, action: 'contact', trigger: trigger.key });
+    this.mind('action', '按触发候选唤醒', { score, action: 'contact', trigger: trigger.key });
     if (trigger.threadId) {
       this.state.surfacedThreads = { ...(this.state.surfacedThreads ?? {}), [trigger.threadId]: now.toISOString() };
       this.state.pendingFollowupThreadId = trigger.threadId;
@@ -2116,7 +2116,7 @@ export class CompanionWorld implements World {
       this.state.lastProactiveReason = reason;
       this.state.proactiveDueAt = null;
       this.save(true);
-      return `已按当前状态开口一次（由头：${reason}）。`;
+      return `已按当前状态唤醒一次（由头：${reason}）。`;
     }
     const gate = evaluate({
       cfg: this.cfg(),
