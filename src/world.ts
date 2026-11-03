@@ -372,19 +372,26 @@ export class CompanionWorld implements World {
           && !record.tags.includes('legacy-chat') && !record.tags.includes('recap'))
         .sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts))
         .slice(0, 12)
-        .map((record) => ({
-          id: record.id,
-          kind: record.kind,
-          scope: record.scope,
-          ts: record.ts,
-          date: formatLocal(record.ts, this.tz()).slice(0, 10),
-          importance: record.importance,
-          text: record.text.slice(0, 160),
-          emotion: record.details?.userEmotion?.label
+        .map((record) => {
+          const userEmotion = record.details?.userEmotion?.label
             ?? (record.kind === 'episode' ? detectEmotion(record.text)?.label : undefined)
-            ?? (record.tags.includes('musing') ? '走神' : '未标注'),
-          musing: record.tags.includes('musing'),
-        }));
+            ?? (record.tags.includes('musing') ? '走神' : '未标注');
+          const howIFelt = record.details?.howIFelt?.slice(0, 30) || '未记录';
+          return {
+            id: record.id,
+            kind: record.kind,
+            scope: record.scope,
+            ts: record.ts,
+            date: formatLocal(record.ts, this.tz()).slice(0, 10),
+            importance: record.importance,
+            text: record.text.slice(0, 160),
+            // 兼容旧客户端：emotion 现在专指“对方（用户）的情绪”。
+            emotion: userEmotion,
+            userEmotion,
+            howIFelt,
+            musing: record.tags.includes('musing'),
+          };
+        });
       return { recent: rows };
     }
     if (method === 'mind') {

@@ -161,7 +161,7 @@ test('世界层：空闲超过阈值会触发一次 musing（白天）', async (
   };
   const world = create({
     id: 'companion',
-    cfg: { ...defaults(), enabled: true, memoryCapture: false },
+    cfg: { ...defaults(), enabled: true, memoryCapture: false, proactiveEnabled: false },
     timezone: 'Asia/Shanghai',
     botName: 'coo',
     botDir: dataDir,

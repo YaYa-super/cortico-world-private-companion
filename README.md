@@ -5,7 +5,7 @@
 > 把 AstrBot 插件 [`astrbot_plugin_private_companion`](https://github.com/menglimi/astrbot_plugin_private_companion)（中文名同样是「我会永远陪着你」）里
 > **“有自己的生活、会在合适的时候主动开口”** 这套机制，独立实现成 Coopanion 的 World 扩展。
 
-npm：`cortico-world-private-companion` · 当前 `0.4.2`（已发布）。首次升级请先备份 `records.json`/`.bak`/`state.json`。
+npm：`cortico-world-private-companion` · 当前 `0.4.2`（已发布）；`0.4.3` 已实现、待发布（最近记忆拆成「你的情绪 / 我当时的感受」）。首次升级请先备份 `records.json`/`.bak`/`state.json`。
 
 ## 致谢与来源
 
@@ -130,7 +130,7 @@ World 页新增「记忆」面板（`src/webui/client.js`）：
 
 - **概览**：记录/事件数、kind 与 scope 分布、规则/人物/话头、归档、合并摘要、隔离区、上次巩固/合并/反思；
 - **此刻**：心情/精力/正在做什么/下次主动、今日主动与走神额度；
-- **最近记忆**：最近 12 条，带情绪标签、类型、重要度；
+- **最近记忆**：最近 12 条，分「你的情绪」和「我当时的感受」两列，带类型、重要度；
 - **心理活动**：只记决策的时间线（主动/回声/记忆/夜间/错误），可按类型过滤；
 - **检索**：关键词 + scope（`main` / `qq:<号>` / `*`），只读；
 - **合并摘要**：列出夜间合并的结果，可点「撤销合并」恢复原文（唯一写操作）；

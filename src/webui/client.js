@@ -42,9 +42,10 @@ const ZH = {
   musingToday: '今日走神',
   nextDue: '下次主动',
   recent: '最近记忆',
-  recentDesc: '最近写进记忆的 12 条；情绪优先用写入时的 userEmotion，没标时按文本粗判，仍无则为「未标注」。',
+  recentDesc: '最近写进记忆的 12 条；「你的情绪」优先用 userEmotion，没标时按文本粗判；「我当时的感受」来自 howIFelt，没写则显示未记录。',
   recentEmpty: '还没有记忆。',
-  columnEmotion: '情绪',
+  columnYourEmotion: '你的情绪',
+  columnMyFeeling: '我当时的感受',
   columnImportance: '重要度',
   mind: '心理活动',
   mindDesc: '只记决策：为什么开口/没开口、回声用了哪条记忆、夜间整理了没有。',
@@ -132,9 +133,10 @@ const EN = {
   musingToday: 'Musings today',
   nextDue: 'Next proactive',
   recent: 'Recent memories',
-  recentDesc: 'The last 12 memories; emotion comes from userEmotion when tagged, otherwise a conservative text guess, else untagged.',
+  recentDesc: 'The last 12 memories; "Your emotion" comes from userEmotion or a conservative text guess; "How I felt" comes from howIFelt, or untagged.',
   recentEmpty: 'No memories yet.',
-  columnEmotion: 'Emotion',
+  columnYourEmotion: 'Your emotion',
+  columnMyFeeling: 'How I felt',
   columnImportance: 'Importance',
   mind: 'Mind log',
   mindDesc: 'Decisions only: why it spoke or stayed quiet, which memory an echo used, whether nightly work was delivered.',
@@ -207,7 +209,7 @@ export default {
         const nowSection = ui.h('div');
         nowSection.append(ui.section(S.now, S.nowDesc), nowFacts);
 
-        const recentTable = ui.table({ head: [S.columnEmotion, S.columnKind, S.columnImportance, S.columnDate, S.columnSnippet], maxHeight: '360px' });
+        const recentTable = ui.table({ head: [S.columnYourEmotion, S.columnMyFeeling, S.columnKind, S.columnImportance, S.columnDate, S.columnSnippet], maxHeight: '360px' });
         const recentSection = ui.h('div');
         recentSection.append(ui.section(S.recent, S.recentDesc), recentTable.el);
 
@@ -358,7 +360,8 @@ export default {
             recentTable.clear(rows.length ? undefined : S.recentEmpty);
             for (const row of rows) {
               recentTable.addRow([
-                row.emotion,
+                row.userEmotion ?? row.emotion,
+                row.howIFelt ?? '未记录',
                 row.kind,
                 String(row.importance ?? ''),
                 row.date ?? String(row.ts ?? '').slice(0, 10),

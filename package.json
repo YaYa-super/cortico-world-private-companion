@@ -1,6 +1,6 @@
 {
   "name": "cortico-world-private-companion",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "type": "module",
   "description": "「我会永远陪着你」Coopanion 版：把 menglimi 的 AstrBot 插件 astrbot_plugin_private_companion 的生活感、主动联系、关系卡与说话分寸，独立实现为 Coopanion 的 World 扩展；内置可迁移记忆（companion-memory/2，导入导出 + 隔离审核）。",
   "keywords": [
