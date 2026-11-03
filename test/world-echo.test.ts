@@ -106,11 +106,12 @@ test('世界层：捕获情绪 → 上下文出现“今天”和情绪回声', 
     importance: 0.7,
   });
   const recent2 = await panel.invokeMemoryPanel('memory', 'recent', []) as {
-    recent: Array<{ text: string; emotion: string }>;
+    recent: Array<{ text: string; emotion: string; userEmotion: string; howIFelt: string }>;
   };
   const tagged = recent2.recent.find((row) => row.text.includes('今天累死了'));
   assert.ok(tagged);
-  assert.equal(tagged.emotion, '疲惫');
+  assert.equal(tagged.userEmotion, '疲惫');
+  assert.equal(tagged.howIFelt, '未记录');
 
   await world.stop();
 
