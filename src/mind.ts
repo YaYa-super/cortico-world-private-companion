@@ -4,7 +4,7 @@
  */
 import { appendFileSync, existsSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 
-export type MindType = 'proactive' | 'gate' | 'trigger' | 'thought' | 'candidate' | 'intention' | 'review' | 'action' | 'followup' | 'echo' | 'memory' | 'nightly' | 'error';
+export type MindType = 'proactive' | 'gate' | 'trigger' | 'thought' | 'candidate' | 'intention' | 'review' | 'action' | 'spoken' | 'silent' | 'followup' | 'echo' | 'memory' | 'nightly' | 'error';
 
 export interface MindEvent {
   ts: string;

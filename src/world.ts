@@ -9,7 +9,7 @@ import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import type {
-  ToolDef, ToolOutcome, World, WorldHost, WorldWebUiDecl,
+  OutputTap, ToolDef, ToolOutcome, World, WorldHost, WorldWebUiDecl,
 } from 'cortico/core/types.ts';
 import type { WorldContext } from 'cortico/world.ts';
 import { COMPANION_CONFIG_GROUP, type CompanionConfig } from './config.ts';
@@ -82,6 +82,12 @@ export class CompanionWorld implements World {
   private tickRunning = false;
   private tickPromise: Promise<void> | null = null;
   private weatherInFlight = false;
+  /** 最近一次 proactive push 的回执跟踪：区分“唤醒”与“真的产出可见正文”。 */
+  private wakeTracking: { at: string; reason: string } | null = null;
+  private wakeText = '';
+  private wakeHadTool = false;
+  private outputTapSeen = false;
+  private wakeReason = '';
   private pendingReviewIds: string[] = [];
 
   constructor(ctx: WorldContext<CompanionConfig>) {
@@ -468,9 +474,27 @@ export class CompanionWorld implements World {
     this.host = null;
   }
 
-  /** 一轮对话结束：记下“刚说过话”，把下一次主动往后推。 */
+  /** 接收主 session 的输出增量，用回执区分“唤醒”与“真的说了”。 */
+  outputTap(): OutputTap {
+    this.outputTapSeen = true;
+    return {
+      onEvent: (event) => {
+        if (!this.wakeTracking) return;
+        if (event.type === 'response.output_text.delta') {
+          const delta = (event as { delta?: string }).delta;
+          if (delta) this.wakeText += delta;
+        } else if (event.type === 'response.output_item.added'
+          && (event as { item?: { type?: string } }).item?.type === 'function_call') {
+          this.wakeHadTool = true;
+        }
+      },
+    };
+  }
+
+  /** 一轮对话结束：先结算 proactive 回执，再记“刚说过话”。 */
   onTurnEnded(): void {
     const now = new Date();
+    this.finalizeWake(now);
     this.lastUserProbe = 0;
     const lastUser = this.probeLastUser(now.getTime());
     // musing/consolidate 这类内部 turn 不代表“刚聊完”，不能把主动开口一直往后推。
@@ -494,6 +518,11 @@ export class CompanionWorld implements World {
     trigger: 'piggyback' | 'flush',
   ): Promise<{ cursor: number; delivered: boolean } | null> {
     if (!this.host) return null;
+    if (type === 'companion.proactive') {
+      this.wakeTracking = { at: new Date().toISOString(), reason: this.wakeReason };
+      this.wakeText = '';
+      this.wakeHadTool = false;
+    }
     try {
       const env = await this.host.pushEvent({
         type,
@@ -503,8 +532,11 @@ export class CompanionWorld implements World {
         text,
       }, { trigger });
       const delivery = (env as { contextDelivery?: string }).contextDelivery;
-      return { cursor: env.cursor, delivered: !delivery || delivery === 'deliver' };
+      const delivered = !delivery || delivery === 'deliver';
+      if (type === 'companion.proactive' && !delivered) this.wakeTracking = null;
+      return { cursor: env.cursor, delivered };
     } catch (error) {
+      if (type === 'companion.proactive') this.wakeTracking = null;
       this.host.log.warn('[companion] 推送失败', String(error));
       this.mind('error', `推送失败：${type}`, { event: type });
       return null;
@@ -1075,6 +1107,7 @@ export class CompanionWorld implements World {
     }
     const text = `【自己的念头】${intention.text}
 这是你自己想到的，可以自然地说一句，也可以不说。`;
+    this.wakeReason = intention.text;
     const pushed = await this.push('companion.proactive', text, 'flush');
     if (!pushed?.delivered) return { ok: false, reason: '未投递，稍后再说' };
     this.state.pendingTrigger = null;
@@ -1093,6 +1126,30 @@ export class CompanionWorld implements World {
     this.snapshot?.invalidate();
     this.save(true);
     return { ok: true, reason: '已放行' };
+  }
+
+  /** 结算一次 proactive 的模型输出回执：有可见正文才算“说了”。 */
+  private finalizeWake(now: Date): void {
+    if (!this.wakeTracking) return;
+    const text = this.wakeText.trim();
+    if (text) {
+      this.noteSent(text, now);
+      this.mind('spoken', `真的说了：${text.slice(0, 80)}`, {
+        chars: text.length,
+        reason: this.wakeTracking.reason.slice(0, 80),
+      });
+    } else if (this.wakeHadTool) {
+      this.mind('silent', '唤醒了，但只调用了工具，没有可见正文', {
+        reason: this.wakeTracking.reason.slice(0, 80),
+      });
+    } else {
+      this.mind('silent', '唤醒了，但这一轮没有可见输出', {
+        reason: this.wakeTracking.reason.slice(0, 80),
+      });
+    }
+    this.wakeTracking = null;
+    this.wakeText = '';
+    this.wakeHadTool = false;
   }
 
   /** 记录真正推送过的主动正文；用于 24h 内容级去重。 */
@@ -1498,6 +1555,7 @@ export class CompanionWorld implements World {
       this.save(true);
       return false;
     }
+    this.wakeReason = reason;
     const pushed = await this.push('companion.proactive', text, 'flush');
     if (!pushed?.delivered) {
       clear();
@@ -1505,7 +1563,6 @@ export class CompanionWorld implements World {
       return false;
     }
     this.lastMindGate = '';
-    this.noteSent(reason, now);
     this.mind('proactive', `开口：${reason}`, {
       ...(trigger.threadId ? { threadId: trigger.threadId } : {}),
     });
@@ -2049,6 +2106,7 @@ export class CompanionWorld implements World {
         quiet: `${this.cfg().quietStart}-${this.cfg().quietEnd}`,
         sinceTalk: since === null ? '记不清了' : humanSpan(since),
       });
+      this.wakeReason = reason;
       const pushed = await this.push('companion.proactive', text, 'flush');
       if (!pushed?.delivered) return '推送失败：World 未连接或当前不可投递。';
       this.mind('proactive', `手动触发：${reason}`);
