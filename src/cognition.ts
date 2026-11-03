@@ -217,6 +217,23 @@ export function scoreThought(
   return Math.min(1, Math.max(0, Number((base - penalty).toFixed(2))));
 }
 
+/** 最近是否已经说过相似的话（用来防跨触发/跨 World 通道复读）。 */
+export function isDuplicateSent(
+  text: string,
+  sent: Array<{ text: string; at: string }>,
+  now: number,
+  hours = 24,
+  threshold = 0.72,
+): boolean {
+  const target = text.trim();
+  if (!target) return false;
+  return sent.some((item) => {
+    const at = Date.parse(item.at);
+    if (!Number.isFinite(at) || now - at > hours * 3_600_000) return false;
+    return textSimilarity(target, item.text) >= threshold;
+  });
+}
+
 /** 粗相似度：用于发送前防重复，不追求语义。 */
 export function textSimilarity(a: string, b: string): number {
   const grams = (text: string) => {

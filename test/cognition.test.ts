@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { makeIntention, pickActionable, scoreThought, textSimilarity, think, thinkAll } from '../src/cognition.ts';
+import { isDuplicateSent, makeIntention, pickActionable, scoreThought, textSimilarity, think, thinkAll } from '../src/cognition.ts';
 
 const base = {
   now: new Date('2026-11-02T20:00:00+08:00'),
@@ -99,6 +99,13 @@ test('高显著 silent 在晚上转 journal，其他时间转 remember', () => {
     journalToday: true,
   });
   assert.equal(pickActionable(withoutJournal, { hour: 20, journalToday: true })?.action, 'remember');
+});
+
+test('24h 内说过相似内容会被去重', () => {
+  const sent = [{ text: '上次没说完的事：视频插件', at: '2026-11-02T20:00:00+08:00' }];
+  assert.equal(isDuplicateSent('上次没说完的事：视频插件', sent, new Date('2026-11-03T10:00:00+08:00').getTime()), true);
+  assert.equal(isDuplicateSent('今天午饭吃什么', sent, new Date('2026-11-03T10:00:00+08:00').getTime()), false);
+  assert.equal(isDuplicateSent('上次没说完的事：视频插件', sent, new Date('2026-11-04T10:00:00+08:00').getTime()), false);
 });
 
 test('背景念头：没有明显念头时返回 null', () => {

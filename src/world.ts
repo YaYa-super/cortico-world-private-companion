@@ -22,7 +22,7 @@ import { TOOL_SPECS } from './tools.ts';
 import { evaluate, reasonFor } from './proactive.ts';
 import { SnapshotPusher } from './snapshot.ts';
 import { detectEmotion, relatedWords } from './emotion.ts';
-import { makeIntention, pickActionable, scoreThought, thinkAll, type Intention, type Thought } from './cognition.ts';
+import { isDuplicateSent, makeIntention, pickActionable, scoreThought, thinkAll, type Intention, type Thought } from './cognition.ts';
 import { MindLog, type MindType } from './mind.ts';
 import { MEMORY_KINDS, MemoryStore, scopeKey, type MemoryKind, type MemoryRecord } from './memory-store.ts';
 import { isHumanEvent, scopeOfEvent } from './event-filter.ts';
@@ -707,7 +707,9 @@ export class CompanionWorld implements World {
     if (this.state.mood < 35) {
       push('body:low-mood', '心里有点闷。', 'body', 0.68);
     }
+    const threadDay = this.state.threadDay ?? {};
     for (const thread of this.memoryStore.openThreads(3)) {
+      if (threadDay[thread.id] === p.date) continue;
       const due = Date.parse(thread.details?.due ?? '');
       const what = (thread.details?.what ?? thread.text).slice(0, 70);
       if (Number.isFinite(due) && due <= now.getTime()) {
@@ -769,6 +771,12 @@ export class CompanionWorld implements World {
     out.sort((a, b) => b.salience - a.salience);
     const chosen = out[0];
     this.state.pendingTrigger = chosen;
+    if (chosen.threadId) {
+      this.state.threadDay = Object.fromEntries(
+        Object.entries({ ...threadDay, [chosen.threadId]: p.date })
+          .filter(([, date]) => date === p.date || Date.parse(date) > now.getTime() - 7 * 86_400_000),
+      );
+    }
     this.state.triggerSeen = Object.fromEntries(
       Object.entries({ ...seen, [chosen.key]: now.toISOString() })
         .filter(([, ts]) => Date.parse(ts) > now.getTime() - 7 * 86_400_000)
@@ -796,7 +804,10 @@ export class CompanionWorld implements World {
     if (this.state.sleeping) return;
 
     const p = localParts(now, this.tz());
-    const threads = this.memoryStore.openThreads(0).slice(0, 2)
+    const threadDay = this.state.threadDay ?? {};
+    const threads = this.memoryStore.openThreads(0)
+      .filter((thread) => threadDay[thread.id] !== p.date)
+      .slice(0, 2)
       .map((thread) => ({ id: thread.id, text: thread.text, what: thread.details?.what }));
     const episodes = this.memoryStore.highIntensityEpisodes(7, 2)
       .map((episode) => ({ id: episode.id, text: episode.text }));
@@ -884,6 +895,13 @@ export class CompanionWorld implements World {
           action: intention.action,
           score: chosenScore,
         });
+        if (intention.refs?.threadId) {
+          const day = localParts(now, this.tz()).date;
+          this.state.threadDay = Object.fromEntries(
+            Object.entries({ ...(this.state.threadDay ?? {}), [String(intention.refs.threadId)]: day })
+              .filter(([, date]) => date === day || Date.parse(date) > now.getTime() - 7 * 86_400_000),
+          );
+        }
       }
     }
     this.save(true);
@@ -1052,6 +1070,9 @@ export class CompanionWorld implements World {
     const cur = currentItem(this.state.agenda, p.minutes);
     if (cur && /开会|上课|工作|忙|面试|考试/.test(cur.title)) return { ok: false, reason: '当前日程繁忙' };
 
+    if (isDuplicateSent(intention.text, this.state.sentTexts ?? [], now.getTime())) {
+      return { ok: false, reason: '最近说过相似的话' };
+    }
     const text = `【自己的念头】${intention.text}
 这是你自己想到的，可以自然地说一句，也可以不说。`;
     const pushed = await this.push('companion.proactive', text, 'flush');
@@ -1072,6 +1093,15 @@ export class CompanionWorld implements World {
     this.snapshot?.invalidate();
     this.save(true);
     return { ok: true, reason: '已放行' };
+  }
+
+  /** 记录真正推送过的主动正文；用于 24h 内容级去重。 */
+  private noteSent(text: string, now: Date): void {
+    const kept = [
+      ...(this.state.sentTexts ?? []),
+      { text: text.slice(0, 200), at: now.toISOString() },
+    ].filter((item) => Date.parse(item.at) > now.getTime() - 48 * 3_600_000).slice(-20);
+    this.state.sentTexts = kept;
   }
 
   private countToday(): number {
@@ -1462,6 +1492,12 @@ export class CompanionWorld implements World {
       return true;
     }
 
+    if (isDuplicateSent(reason, this.state.sentTexts ?? [], now.getTime())) {
+      this.mind('review', '最近说过相似的话，暂缓', { score });
+      clear();
+      this.save(true);
+      return false;
+    }
     const pushed = await this.push('companion.proactive', text, 'flush');
     if (!pushed?.delivered) {
       clear();
@@ -1469,6 +1505,7 @@ export class CompanionWorld implements World {
       return false;
     }
     this.lastMindGate = '';
+    this.noteSent(reason, now);
     this.mind('proactive', `开口：${reason}`, {
       ...(trigger.threadId ? { threadId: trigger.threadId } : {}),
     });
