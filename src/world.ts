@@ -494,7 +494,8 @@ export class CompanionWorld implements World {
   /** 一轮对话结束：先结算 proactive 回执，再记“刚说过话”。 */
   onTurnEnded(): void {
     const now = new Date();
-    this.finalizeWake(now);
+    const settledWake = this.finalizeWake(now);
+    if (settledWake) this.save(true);
     this.lastUserProbe = 0;
     const lastUser = this.probeLastUser(now.getTime());
     // musing/consolidate 这类内部 turn 不代表“刚聊完”，不能把主动开口一直往后推。
@@ -563,6 +564,10 @@ export class CompanionWorld implements World {
       const now = new Date();
       // 先处理用户回复/未回应，再生成上下文，follow-up 才能赶上这一轮。
       this.refreshCognitionFeedback(now);
+      if (this.wakeTracking && now.getTime() - Date.parse(this.wakeTracking.at) > 10 * 60_000) {
+        this.finalizeWake(now);
+        this.save(true);
+      }
       await this.refreshWeather(now);
       await this.refreshHolidays(now);
       this.scheduleProactiveTriggers(now);
@@ -1129,8 +1134,8 @@ export class CompanionWorld implements World {
   }
 
   /** 结算一次 proactive 的模型输出回执：有可见正文才算“说了”。 */
-  private finalizeWake(now: Date): void {
-    if (!this.wakeTracking) return;
+  private finalizeWake(now: Date): boolean {
+    if (!this.wakeTracking) return false;
     const text = this.wakeText.trim();
     if (text) {
       this.noteSent(text, now);
@@ -1150,6 +1155,7 @@ export class CompanionWorld implements World {
     this.wakeTracking = null;
     this.wakeText = '';
     this.wakeHadTool = false;
+    return true;
   }
 
   /** 记录真正推送过的主动正文；用于 24h 内容级去重。 */
