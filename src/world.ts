@@ -83,10 +83,9 @@ export class CompanionWorld implements World {
   private tickPromise: Promise<void> | null = null;
   private weatherInFlight = false;
   /** 最近一次 proactive push 的回执跟踪：区分“唤醒”与“真的产出可见正文”。 */
-  private wakeTracking: { at: string; reason: string } | null = null;
+  private wakeTracking: { at: string; lastAt: string; reason: string } | null = null;
   private wakeText = '';
   private wakeHadTool = false;
-  private outputTapSeen = false;
   private wakeReason = '';
   private pendingReviewIds: string[] = [];
 
@@ -476,10 +475,10 @@ export class CompanionWorld implements World {
 
   /** 接收主 session 的输出增量，用回执区分“唤醒”与“真的说了”。 */
   outputTap(): OutputTap {
-    this.outputTapSeen = true;
     return {
       onEvent: (event) => {
         if (!this.wakeTracking) return;
+        this.wakeTracking.lastAt = new Date().toISOString();
         if (event.type === 'response.output_text.delta') {
           const delta = (event as { delta?: string }).delta;
           if (delta) this.wakeText += delta;
@@ -488,7 +487,36 @@ export class CompanionWorld implements World {
           this.wakeHadTool = true;
         }
       },
+      onAbort: (reason) => {
+        if (!this.wakeTracking) return;
+        this.mind('silent', '主动轮中止，未拿到完整回执', {
+          reason: this.wakeTracking.reason.slice(0, 80),
+          abort: reason.slice(0, 60),
+        });
+        this.clearWake();
+      },
     };
+  }
+
+  /** 事件真正写入主 session 后才开始回执跟踪，避免把普通对话算成主动。 */
+  onEventsSettled(
+    events: ReadonlyArray<{ type: string; source: string; meta?: Record<string, unknown> }>,
+    outcome: 'delivered' | 'discarded',
+  ): void {
+    const wake = events.find((event) => event.type === 'companion.proactive' && event.source === this.id);
+    if (!wake) return;
+    if (outcome === 'discarded') {
+      this.clearWake();
+      return;
+    }
+    const now = new Date().toISOString();
+    this.wakeTracking = {
+      at: now,
+      lastAt: now,
+      reason: String(wake.meta?.companionWake ?? ''),
+    };
+    this.wakeText = '';
+    this.wakeHadTool = false;
   }
 
   /** 一轮对话结束：先结算 proactive 回执，再记“刚说过话”。 */
@@ -519,11 +547,6 @@ export class CompanionWorld implements World {
     trigger: 'piggyback' | 'flush',
   ): Promise<{ cursor: number; delivered: boolean } | null> {
     if (!this.host) return null;
-    if (type === 'companion.proactive') {
-      this.wakeTracking = { at: new Date().toISOString(), reason: this.wakeReason };
-      this.wakeText = '';
-      this.wakeHadTool = false;
-    }
     try {
       const env = await this.host.pushEvent({
         type,
@@ -531,13 +554,12 @@ export class CompanionWorld implements World {
         source: this.id,
         origin: 'internal',
         text,
+        ...(type === 'companion.proactive' ? { meta: { companionWake: this.wakeReason } } : {}),
       }, { trigger });
       const delivery = (env as { contextDelivery?: string }).contextDelivery;
       const delivered = !delivery || delivery === 'deliver';
-      if (type === 'companion.proactive' && !delivered) this.wakeTracking = null;
       return { cursor: env.cursor, delivered };
     } catch (error) {
-      if (type === 'companion.proactive') this.wakeTracking = null;
       this.host.log.warn('[companion] 推送失败', String(error));
       this.mind('error', `推送失败：${type}`, { event: type });
       return null;
@@ -564,8 +586,11 @@ export class CompanionWorld implements World {
       const now = new Date();
       // 先处理用户回复/未回应，再生成上下文，follow-up 才能赶上这一轮。
       this.refreshCognitionFeedback(now);
-      if (this.wakeTracking && now.getTime() - Date.parse(this.wakeTracking.at) > 10 * 60_000) {
-        this.finalizeWake(now);
+      if (this.wakeTracking && now.getTime() - Date.parse(this.wakeTracking.lastAt) > 10 * 60_000) {
+        this.mind('error', '主动回执超时，未拿到完整输出', {
+          reason: this.wakeTracking.reason.slice(0, 80),
+        });
+        this.clearWake();
         this.save(true);
       }
       await this.refreshWeather(now);
@@ -765,7 +790,7 @@ export class CompanionWorld implements World {
     }
     const holiday = cfg.holidayEnabled ? this.state.holidays?.[p.date] : undefined;
     if (holiday) {
-      const safe = String(holiday).replace(/[ -]/g, '').slice(0, 20);
+      const safe = String(holiday).replace(/[\u0000-\u001f]/g, '').slice(0, 20);
       if (safe) push(`holiday:${p.date}`, `今天是${safe}。`, 'social', 0.82);
     }
     const todayMonthDay = p.date.slice(5);
@@ -808,12 +833,6 @@ export class CompanionWorld implements World {
     out.sort((a, b) => b.salience - a.salience);
     const chosen = out[0];
     this.state.pendingTrigger = chosen;
-    if (chosen.threadId) {
-      this.state.threadDay = Object.fromEntries(
-        Object.entries({ ...threadDay, [chosen.threadId]: p.date })
-          .filter(([, date]) => date === p.date || Date.parse(date) > now.getTime() - 7 * 86_400_000),
-      );
-    }
     this.state.triggerSeen = Object.fromEntries(
       Object.entries({ ...seen, [chosen.key]: now.toISOString() })
         .filter(([, ts]) => Date.parse(ts) > now.getTime() - 7 * 86_400_000)
@@ -849,8 +868,9 @@ export class CompanionWorld implements World {
     const episodes = this.memoryStore.highIntensityEpisodes(7, 2)
       .map((episode) => ({ id: episode.id, text: episode.text }));
     const episodeIds = new Set(episodes.map((episode) => episode.id));
-    const memories = this.memoryStore.recent(5, this.activeScope())
+    const memories = this.memoryStore.recent(20, this.activeScope())
       .filter((record) => record.kind === 'episode' && !episodeIds.has(record.id))
+      .slice(0, 3)
       .map((record) => ({ id: record.id, text: record.text }));
     const journalToday = readJournal(this.dataDir, 200)
       .some((entry) => formatLocal(entry.ts, this.tz()).slice(0, 10) === p.date);
@@ -932,13 +952,6 @@ export class CompanionWorld implements World {
           action: intention.action,
           score: chosenScore,
         });
-        if (intention.refs?.threadId) {
-          const day = localParts(now, this.tz()).date;
-          this.state.threadDay = Object.fromEntries(
-            Object.entries({ ...(this.state.threadDay ?? {}), [String(intention.refs.threadId)]: day })
-              .filter(([, date]) => date === day || Date.parse(date) > now.getTime() - 7 * 86_400_000),
-          );
-        }
       }
     }
     this.save(true);
@@ -952,9 +965,14 @@ export class CompanionWorld implements World {
     let changed = false;
     // 过期清理与实验开关无关，关掉实验后 pending 也不能永远挂着。
     for (const intention of intentions) {
-      if (intention.status === 'pending'
+      if ((intention.status === 'pending' || intention.status === 'held')
         && now.getTime() - Date.parse(intention.createdAt) > 12 * 3_600_000) {
         intention.status = 'expired';
+        changed = true;
+      } else if (intention.status === 'held' && intention.retryAt
+        && now.getTime() >= Date.parse(intention.retryAt)
+        && (intention.tries ?? 0) < 3) {
+        intention.status = 'pending';
         changed = true;
       }
     }
@@ -967,6 +985,8 @@ export class CompanionWorld implements World {
     }
     for (const intention of intentions) {
       if (intention.status !== 'pending') continue;
+      const retry = Date.parse(intention.retryAt ?? '');
+      if (Number.isFinite(retry) && retry > now.getTime()) continue;
       const due = Date.parse(intention.dueAt);
       if (!Number.isFinite(due) || due > now.getTime()) continue;
       if (intention.action === 'journal') {
@@ -1008,7 +1028,14 @@ export class CompanionWorld implements World {
         changed = true;
       } else if (intention.action === 'contact') {
         const review = await this.reviewAndSendContact(intention, now, p);
-        intention.status = review.ok ? 'done' : 'held';
+        if (review.ok) {
+          intention.status = 'done';
+        } else {
+          intention.tries = (intention.tries ?? 0) + 1;
+          const retryable = this.cfg().cognitionContactMode === 'send' && intention.tries < 3;
+          intention.status = 'held';
+          if (retryable) intention.retryAt = new Date(now.getTime() + 15 * 60_000).toISOString();
+        }
         this.mind('review', `${review.ok ? '联系放行' : '联系暂缓'}：${review.reason}`, {
           intentionId: intention.id,
           action: intention.action,
@@ -1115,6 +1142,7 @@ export class CompanionWorld implements World {
     this.wakeReason = intention.text;
     const pushed = await this.push('companion.proactive', text, 'flush');
     if (!pushed?.delivered) return { ok: false, reason: '未投递，稍后再说' };
+    if (intention.refs?.threadId) this.markThreadDay(String(intention.refs.threadId), now);
     this.state.pendingTrigger = null;
     this.state.proactiveCount += 1;
     this.state.proactiveDay = p.date;
@@ -1138,7 +1166,7 @@ export class CompanionWorld implements World {
     if (!this.wakeTracking) return false;
     const text = this.wakeText.trim();
     if (text) {
-      this.noteSent(text, now);
+      this.noteSent(text, now, this.wakeTracking.reason);
       this.mind('spoken', `真的说了：${text.slice(0, 80)}`, {
         chars: text.length,
         reason: this.wakeTracking.reason.slice(0, 80),
@@ -1152,17 +1180,30 @@ export class CompanionWorld implements World {
         reason: this.wakeTracking.reason.slice(0, 80),
       });
     }
-    this.wakeTracking = null;
-    this.wakeText = '';
-    this.wakeHadTool = false;
+    this.clearWake();
     return true;
   }
 
+  private clearWake(): void {
+    this.wakeTracking = null;
+    this.wakeText = '';
+    this.wakeHadTool = false;
+  }
+
+  /** 同一 thread 每天最多真正联系一次（投递成功后才写）。 */
+  private markThreadDay(threadId: string, now: Date): void {
+    const day = localParts(now, this.tz()).date;
+    this.state.threadDay = Object.fromEntries(
+      Object.entries({ ...(this.state.threadDay ?? {}), [threadId]: day })
+        .filter(([, date]) => date === day || Date.parse(date) > now.getTime() - 7 * 86_400_000),
+    );
+  }
+
   /** 记录真正推送过的主动正文；用于 24h 内容级去重。 */
-  private noteSent(text: string, now: Date): void {
+  private noteSent(text: string, now: Date, reason = ''): void {
     const kept = [
       ...(this.state.sentTexts ?? []),
-      { text: text.slice(0, 200), at: now.toISOString() },
+      { text: text.slice(0, 200), reason: reason.slice(0, 200), at: now.toISOString() },
     ].filter((item) => Date.parse(item.at) > now.getTime() - 48 * 3_600_000).slice(-20);
     this.state.sentTexts = kept;
   }
@@ -1569,6 +1610,7 @@ export class CompanionWorld implements World {
       return false;
     }
     this.lastMindGate = '';
+    if (trigger.threadId) this.markThreadDay(trigger.threadId, now);
     this.mind('proactive', `唤醒：${reason}`, {
       ...(trigger.threadId ? { threadId: trigger.threadId } : {}),
     });

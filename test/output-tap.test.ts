@@ -27,6 +27,7 @@ test('proactive 回执：有可见正文才算 spoken', async () => {
     tools(): Array<{ name: string; handler: (a: Record<string, unknown>, c: unknown) => Promise<unknown> }>;
     outputTap(): { onEvent(e: unknown): void };
     onTurnEnded(): void;
+    onEventsSettled(e: Array<{type:string;source:string;meta?:Record<string,unknown>}>, o: 'delivered'|'discarded'): void;
     state: { sentTexts: Array<{ text: string }> };
   };
   const host = {
@@ -47,6 +48,7 @@ test('proactive 回执：有可见正文才算 spoken', async () => {
   assert.ok(tool);
   const out = await tool.handler({ action: 'trigger' }, {});
   assert.match(String(out), /唤醒/);
+  w.onEventsSettled([{ type: 'companion.proactive', source: 'companion', meta: { companionWake: '测试' } }], 'delivered');
   w.outputTap().onEvent({ type: 'response.output_text.delta', delta: '我在。' });
   w.onTurnEnded();
   assert.equal(w.state.sentTexts.at(-1)?.text, '我在。');
@@ -77,6 +79,7 @@ test('proactive 回执：没有可见正文只记 silent，不写 sentTexts', as
     tools(): Array<{ name: string; handler: (a: Record<string, unknown>, c: unknown) => Promise<unknown> }>;
     outputTap(): { onEvent(e: unknown): void };
     onTurnEnded(): void;
+    onEventsSettled(e: Array<{type:string;source:string;meta?:Record<string,unknown>}>, o: 'delivered'|'discarded'): void;
     state: { sentTexts: Array<{ text: string }> };
   };
   const host = {
@@ -96,6 +99,7 @@ test('proactive 回执：没有可见正文只记 silent，不写 sentTexts', as
   const tool = w.tools().find((item) => item.name === 'companion_proactive');
   assert.ok(tool);
   await tool.handler({ action: 'trigger' }, {});
+  w.onEventsSettled([{ type: 'companion.proactive', source: 'companion', meta: { companionWake: '测试' } }], 'delivered');
   w.outputTap().onEvent({ type: 'response.output_item.added', item: { type: 'function_call' } });
   w.onTurnEnded();
   assert.equal(w.state.sentTexts.length, 0);

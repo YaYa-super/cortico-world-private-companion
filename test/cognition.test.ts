@@ -105,6 +105,7 @@ test('24h 内说过相似内容会被去重', () => {
   const sent = [{ text: '上次没说完的事：视频插件', at: '2026-11-02T20:00:00+08:00' }];
   assert.equal(isDuplicateSent('上次没说完的事：视频插件', sent, new Date('2026-11-03T10:00:00+08:00').getTime()), true);
   assert.equal(isDuplicateSent('今天午饭吃什么', sent, new Date('2026-11-03T10:00:00+08:00').getTime()), false);
+  assert.equal(isDuplicateSent('视频插件', [{ text: '嗯，我在。', reason: '视频插件', at: '2026-11-02T20:00:00+08:00' }], new Date('2026-11-03T10:00:00+08:00').getTime()), true);
   assert.equal(isDuplicateSent('上次没说完的事：视频插件', sent, new Date('2026-11-04T10:00:00+08:00').getTime()), false);
 });
 

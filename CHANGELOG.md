@@ -7,6 +7,9 @@
 - 实验认知：`thinkAll` 返回全部候选，最高分 silent 照记；意图从最高分可行动候选选；高显著 silent 晚上转 journal、其他时间转 remember，不再吞掉可行动候选。
 - 主动去重：同一 thread 每天最多触发/联系一次；最近 24h 说过相似内容（按正文相似度）不再推送，正常 proactive 与实验 contact 共用。
 - 主动回执：接主 session 输出流，唤醒后实际有正文记 `spoken`、无正文记 `silent`；`sentTexts` 改为只记录真正说出的正文，不再把“唤醒成功”当成“说过”。
+- 回执只在 `onEventsSettled(delivered)` 后开始，discarded/onAbort/超时不计 spoken；内容去重同时比对由头与实际正文。
+- 同一 thread 每天一次改为“投递成功后才占用”；held 联系意图 15 分钟后最多重试 3 次，12 小时过期。
+- 修复源码中的裸 NUL/控制字节；认知记忆候选先取 recent(20) 再筛 episode。
 
 ## 0.4.2 — 2026-11-02
 

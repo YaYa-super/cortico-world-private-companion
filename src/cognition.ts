@@ -43,6 +43,8 @@ export interface Intention {
   createdAt: string;
   dueAt: string;
   status: 'pending' | 'done' | 'held' | 'expired';
+  retryAt?: string;
+  tries?: number;
   refs?: Record<string, string | number>;
 }
 
@@ -220,7 +222,7 @@ export function scoreThought(
 /** 最近是否已经说过相似的话（用来防跨触发/跨 World 通道复读）。 */
 export function isDuplicateSent(
   text: string,
-  sent: Array<{ text: string; at: string }>,
+  sent: Array<{ text: string; reason?: string; at: string }>,
   now: number,
   hours = 24,
   threshold = 0.72,
@@ -230,7 +232,8 @@ export function isDuplicateSent(
   return sent.some((item) => {
     const at = Date.parse(item.at);
     if (!Number.isFinite(at) || now - at > hours * 3_600_000) return false;
-    return textSimilarity(target, item.text) >= threshold;
+    return textSimilarity(target, item.text) >= threshold
+      || (!!item.reason && textSimilarity(target, item.reason) >= threshold);
   });
 }
 

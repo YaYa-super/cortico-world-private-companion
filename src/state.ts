@@ -69,7 +69,7 @@ export interface CompanionState {
   /** 最近想过/记录过的念头：key → 时间（用于冷却，避免复读）。 */
   thoughtSeen: Record<string, string>;
   /** 最近真正推送过的主动正文（防跨触发/跨通道复读）。 */
-  sentTexts: Array<{ text: string; at: string }>;
+  sentTexts: Array<{ text: string; reason?: string; at: string }>;
   /** thread id → 最近一次触发/联系的日期（YYYY-MM-DD），同一 thread 每天最多一次。 */
   threadDay: Record<string, string>;
   /** 尚未落地的意图；只保留最近一小段。 */

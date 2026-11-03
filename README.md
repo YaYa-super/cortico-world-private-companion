@@ -5,7 +5,7 @@
 > 把 AstrBot 插件 [`astrbot_plugin_private_companion`](https://github.com/menglimi/astrbot_plugin_private_companion)（中文名同样是「我会永远陪着你」）里
 > **“有自己的生活、会在合适的时候主动开口”** 这套机制，独立实现成 Coopanion 的 World 扩展。
 
-npm：`cortico-world-private-companion` · 当前 `0.4.2`（已发布）；`0.4.3` 已实现、待发布（最近记忆拆成「你的情绪 / 我当时的感受」）。首次升级请先备份 `records.json`/`.bak`/`state.json`。
+npm：`cortico-world-private-companion` · 当前 `0.4.3`（发布前最后检查；`0.4.2` 及以前已发布）。本次包含最近记忆两列、回执区分、thread/内容去重与认知行动修复。首次升级请先备份 `records.json`/`.bak`/`state.json`。
 
 ## 致谢与来源
 
@@ -43,7 +43,7 @@ npm：`cortico-world-private-companion` · 当前 `0.4.2`（已发布）；`0.4.
 ```powershell
 cd "D:\Coopanion\data\extensions"
 # package.json → dependencies 加：
-#   "cortico-world-private-companion": "^0.4.2"
+#   "cortico-world-private-companion": "^0.4.3"
 node "D:\Coopanion\resources\app\node_modules\pnpm\bin\pnpm.cjs" install --no-frozen-lockfile
 ```
 
