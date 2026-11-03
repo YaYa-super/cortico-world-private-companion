@@ -89,7 +89,7 @@ node "D:\Coopanion\resources\app\node_modules\pnpm\bin\pnpm.cjs" install --no-fr
 | `mergeEnabled` | true | 夜间是否合并相似经历（合并式遗忘） |
 | `mergeSimilarity` | 0.5 | 合并相似度阈值（0.3 激进 / 0.9 保守） |
 | `mindLogLevel` | summary | 心理活动日志：off 关闭 / summary 只记决策 |
-| `cognitionMode` | off | 背景念头：off / shadow 只记念头 / act 允许写日记、休息（不自动发消息） |
+| `cognitionMode` | off | 背景念头：off / shadow 只记念头 / act 允许写日记、记念头、休息（contact 默认 hold） |
 | `cognitionIntervalMin` | 10 | 两次背景念头的最小间隔（分钟） |
 | `weatherEnabled` | false | 开启天气触发（Open-Meteo，免费；需填城市） |
 | `weatherCity` | 空 | 天气城市名，例如「杭州」「北京」；留空不查询 |
@@ -147,7 +147,7 @@ World 页新增「记忆」面板（`src/webui/client.js`）：
 ## 开发
 
 ```bash
-node --test            # 77 个用例：时区/状态/主动/记忆库（损坏恢复、去重、检索、隔离区、导出 scope、裁剪、事件过滤、情绪/复习/合并/musing）
+node --test            # 79 个用例：时区/状态/主动/记忆库（损坏恢复、去重、检索、隔离区、导出 scope、裁剪、事件过滤、情绪/复习/合并/musing）
 node tools/import-memory-extra.mjs --dry   # 预览从旧记忆库能导多少
 node tools/eval-memory.mjs                 # 32 问记忆评测：recall@3 / 纯度 / p95
 node tools/eval-persona.mjs                # 6 问人格卡评测（CONSTITUTION）

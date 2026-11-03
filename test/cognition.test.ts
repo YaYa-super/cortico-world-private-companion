@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { makeIntention, scoreThought, textSimilarity, think } from '../src/cognition.ts';
+import { makeIntention, pickActionable, scoreThought, textSimilarity, think, thinkAll } from '../src/cognition.ts';
 
 const base = {
   now: new Date('2026-11-02T20:00:00+08:00'),
@@ -68,6 +68,37 @@ test('候选评分会被未回应和繁忙拉低', () => {
 test('发送前相似度能识别重复措辞', () => {
   assert.ok(textSimilarity('上次没说完的事：插件还没做完', '上次没说完的事：插件还没做完') > 0.9);
   assert.ok(textSimilarity('今天累死了', '明天天气不错') < 0.2);
+});
+
+test('thinkAll 不吞掉被 silent 压住的可行动候选', () => {
+  const thoughts = thinkAll({
+    ...base,
+    mood: 80,
+    episodes: [{ id: 'e1', text: '昨晚一起看海' }],
+    threads: [],
+  });
+  assert.equal(thoughts[0]?.action, 'silent');
+  const actionable = pickActionable(thoughts, { hour: 12, journalToday: true });
+  assert.ok(actionable);
+  assert.equal(actionable?.action, 'journal');
+});
+
+test('高显著 silent 在晚上转 journal，其他时间转 remember', () => {
+  const thoughts = thinkAll({
+    ...base,
+    episodes: [{ id: 'e1', text: '昨晚一起看海' }],
+    threads: [],
+    journalToday: false,
+  });
+  assert.equal(thoughts[0]?.action, 'silent');
+  assert.equal(pickActionable(thoughts, { hour: 20, journalToday: false })?.action, 'journal');
+  const withoutJournal = thinkAll({
+    ...base,
+    episodes: [{ id: 'e1', text: '昨晚一起看海' }],
+    threads: [],
+    journalToday: true,
+  });
+  assert.equal(pickActionable(withoutJournal, { hour: 20, journalToday: true })?.action, 'remember');
 });
 
 test('背景念头：没有明显念头时返回 null', () => {

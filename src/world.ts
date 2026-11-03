@@ -22,7 +22,7 @@ import { TOOL_SPECS } from './tools.ts';
 import { evaluate, reasonFor } from './proactive.ts';
 import { SnapshotPusher } from './snapshot.ts';
 import { detectEmotion, relatedWords } from './emotion.ts';
-import { makeIntention, scoreThought, think, type Intention, type Thought } from './cognition.ts';
+import { makeIntention, pickActionable, scoreThought, thinkAll, type Intention, type Thought } from './cognition.ts';
 import { MindLog, type MindType } from './mind.ts';
 import { MEMORY_KINDS, MemoryStore, scopeKey, type MemoryKind, type MemoryRecord } from './memory-store.ts';
 import { isHumanEvent, scopeOfEvent } from './event-filter.ts';
@@ -813,7 +813,7 @@ export class CompanionWorld implements World {
     const recentKeys = Object.entries(seen)
       .filter(([, ts]) => Date.parse(ts) > cutoff)
       .map(([key]) => key);
-    const thought = think({
+    const thoughts = thinkAll({
       now,
       hour: p.hour,
       energy: this.state.energy,
@@ -827,40 +827,62 @@ export class CompanionWorld implements World {
       ...(cur ? { currentAgenda: cur.title } : {}),
       ...(next ? { nextAgenda: next.title } : {}),
     }, recentKeys);
-    if (!thought) return;
-    this.state.lastThoughtKey = thought.key;
-    this.state.thoughtSeen = Object.fromEntries(
-      Object.entries({ ...seen, [thought.key]: now.toISOString() })
-        .filter(([, ts]) => Date.parse(ts) > now.getTime() - 7 * 86_400_000),
-    );
+    if (!thoughts.length) return;
+    const top = thoughts[0];
+    const chosen = pickActionable(thoughts, { hour: p.hour, journalToday });
     const busy = /开会|上课|工作|忙|面试|考试/.test(cur?.title ?? '');
-    const score = scoreThought(thought, {
+    const topScore = scoreThought(top, {
       unanswered: this.state.cognitionUnanswered ?? 0,
       busy,
     });
-    this.mind('thought', thought.text, {
-      action: thought.action,
-      salience: thought.salience,
-      score,
-      source: thought.source,
-      ...thought.refs,
+    const chosenScore = chosen
+      ? (chosen.key === top.key && chosen.action === top.action
+        ? topScore
+        : scoreThought(chosen, { unanswered: this.state.cognitionUnanswered ?? 0, busy }))
+      : topScore;
+    this.state.lastThoughtKey = top.key;
+    this.state.thoughtSeen = Object.fromEntries(
+      Object.entries({
+        ...seen,
+        [top.key]: now.toISOString(),
+        ...(chosen && chosen.key !== top.key ? { [chosen.key]: now.toISOString() } : {}),
+      }).filter(([, ts]) => Date.parse(ts) > now.getTime() - 7 * 86_400_000),
+    );
+    this.mind('thought', top.text, {
+      action: top.action,
+      salience: top.salience,
+      score: topScore,
+      source: top.source,
+      ...top.refs,
     });
-    this.mind('candidate', `${score >= 0.45 ? '保留' : '丢弃'}：${thought.text}`, {
-      score,
-      action: thought.action,
-      source: thought.source,
+    this.mind('candidate', `${topScore >= 0.45 ? '保留' : '丢弃'}：${top.text}`, {
+      score: topScore,
+      action: top.action,
+      source: top.source,
       ...(busy ? { gate: 'busy' } : {}),
     });
-    if (mode === 'act' && thought.action !== 'silent' && score >= 0.45) {
+    if (chosen && (chosen.key !== top.key || chosen.action !== top.action)) {
+      this.mind('candidate', `可行动：${chosen.text}`, {
+        score: chosenScore,
+        action: chosen.action,
+        source: chosen.source,
+        from: top.key,
+        ...(busy ? { gate: 'busy' } : {}),
+      });
+    }
+    if (mode === 'act' && chosen && chosenScore >= 0.45) {
       const intentions = this.state.intentions ?? [];
-      if (!intentions.some((intention) => intention.key === thought.key && intention.status === 'pending')) {
-        const intention = makeIntention(thought, now, score);
+      if (!intentions.some((intention) => intention.key === chosen.key && intention.status === 'pending')) {
+        const intention = makeIntention(chosen, now, chosenScore);
         this.state.intentions = [...intentions, intention].slice(-20);
-        this.mind('intention', `想${thought.action === 'contact' ? '找他' : thought.action === 'journal' ? '写下来' : '去休息'}：${thought.text}`, {
+        const verb = intention.action === 'contact' ? '找他'
+          : intention.action === 'journal' ? '写下来'
+            : intention.action === 'remember' ? '记下来' : '去休息';
+        this.mind('intention', `想${verb}：${intention.text}`, {
           intentionId: intention.id,
           dueAt: intention.dueAt,
           action: intention.action,
-          score,
+          score: chosenScore,
         });
       }
     }
@@ -914,6 +936,19 @@ export class CompanionWorld implements World {
         this.state.restUntil = new Date(now.getTime() + 30 * 60_000).toISOString();
         this.snapshot?.invalidate();
         this.mind('action', '按意图去休息了', { intentionId: intention.id });
+        intention.status = 'done';
+        changed = true;
+      } else if (intention.action === 'remember') {
+        const added = this.memoryStore.add({
+          kind: 'self',
+          text: `（自己想到的）${intention.text}`,
+          scope: this.activeScope(),
+          importance: 0.35,
+          source: 'cognition',
+          tags: ['thought'],
+          details: { topic: '念头' },
+        });
+        if (added.added) this.mind('action', '按意图记下一个念头', { intentionId: intention.id });
         intention.status = 'done';
         changed = true;
       } else if (intention.action === 'contact') {

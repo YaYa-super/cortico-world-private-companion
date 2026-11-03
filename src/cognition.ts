@@ -6,7 +6,7 @@
  * journal/rest，contact 只形成意图但不自动发消息。
  */
 
-export type ThoughtAction = 'silent' | 'journal' | 'rest' | 'contact';
+export type ThoughtAction = 'silent' | 'journal' | 'remember' | 'rest' | 'contact';
 
 export interface ThoughtInput {
   now: Date;
@@ -49,7 +49,7 @@ export interface Intention {
 const HOUR_MS = 3_600_000;
 
 /** 从一个最小状态集产生“此刻最明显的一个念头”；没有明显念头时返回 null。 */
-export function think(input: ThoughtInput, avoidKeys: string[] = []): Thought | null {
+export function thinkAll(input: ThoughtInput, avoidKeys: string[] = []): Thought[] {
   const out: Thought[] = [];
   const push = (t: Thought) => {
     if (t.text.trim()) out.push(t);
@@ -175,10 +175,34 @@ export function think(input: ThoughtInput, avoidKeys: string[] = []): Thought | 
     });
   }
 
-  if (!out.length) return null;
   out.sort((a, b) => b.salience - a.salience);
   // 最近已经想过的念头先放一放；全都想过就宁可安静，也不复读。
-  return out.find((thought) => !avoidKeys.includes(thought.key)) ?? null;
+  return out.filter((thought) => !avoidKeys.includes(thought.key));
+}
+
+/** 兼容旧调用：只取最高分念头。 */
+export function think(input: ThoughtInput, avoidKeys: string[] = []): Thought | null {
+  return thinkAll(input, avoidKeys)[0] ?? null;
+}
+
+/**
+ * 从候选列表里选出真正要落地的意图：
+ * - 有直接可行动候选，选最高分那个；
+ * - 没有可行动候选，但最高分 silent 足够显著：晚上转 journal，其他时间转 remember；
+ * - 其他情况返回 null（只想想，不行动）。
+ */
+export function pickActionable(
+  thoughts: Thought[],
+  input: { hour: number; journalToday: boolean },
+): Thought | null {
+  const direct = thoughts.find((thought) => thought.action !== 'silent' && thought.salience >= 0.4);
+  if (direct) return direct;
+  const silent = thoughts.find((thought) => thought.action === 'silent' && thought.salience >= 0.5);
+  if (!silent) return null;
+  if (!input.journalToday && input.hour >= 20) {
+    return { ...silent, action: 'journal' };
+  }
+  return { ...silent, action: 'remember' };
 }
 
 /** 候选评分：念头显著性 + 来源权重 - 未回应/繁忙惩罚。 */
@@ -213,7 +237,8 @@ export function textSimilarity(a: string, b: string): number {
 export function makeIntention(thought: Thought, now: Date, score?: number): Intention {
   const delay = thought.action === 'contact' ? 30 * 60_000
     : thought.action === 'journal' ? 5 * 60_000
-      : 60_000;
+      : thought.action === 'remember' ? 2 * 60_000
+        : 60_000;
   return {
     id: `intent-${now.getTime()}-${Math.random().toString(36).slice(2, 7)}`,
     key: thought.key,
