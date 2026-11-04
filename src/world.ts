@@ -28,6 +28,7 @@ import { MEMORY_KINDS, MemoryStore, scopeKey, type MemoryKind, type MemoryRecord
 import { isHumanEvent, scopeOfEvent } from './event-filter.ts';
 import { fetchWeather, weatherTrigger } from './weather.ts';
 import { fetchHolidays, fixedHolidays } from './holidays.ts';
+import { buildGitmemProjection, searchGitmem, workspaceFor, writeGitmemProjection } from './gitmem.ts';
 import {
   MAIN_KEY, appendJournal, ensureDir, journalPath, readJournal, readJson, writeJsonAtomic,
   type JournalEntry, type Profile, type ProfileMap,
@@ -89,6 +90,7 @@ export class CompanionWorld implements World {
   /** 本轮 proactive 里的工具调用名与参数，用来识别 pet_say 这类 speak 工具。 */
   private wakeTools: Array<{ id: string; name: string; args: string }> = [];
   private wakeReason = '';
+  private gitmemSignature = '';
   private pendingReviewIds: string[] = [];
 
   constructor(ctx: WorldContext<CompanionConfig>) {
@@ -136,6 +138,22 @@ export class CompanionWorld implements World {
       writeJsonAtomic(join(this.dataDir, PROFILES_FILE), this.profiles);
     } catch (error) {
       this.host?.log.warn('[companion] 状态落盘失败', String(error));
+    }
+    this.syncGitmemProjection();
+  }
+
+  /** 主记忆 → GitMem 只读投影；内容签名不变就不重写。 */
+  private syncGitmemProjection(): void {
+    const cfg = this.cfg();
+    if (!cfg.gitmemBridgeEnabled || !cfg.memoryEnabled || !this.host) return;
+    try {
+      const projection = buildGitmemProjection(this.memoryStore.entries());
+      if (projection.signature === this.gitmemSignature) return;
+      const workspace = workspaceFor(this.ctx.botDir, cfg.gitmemWorkspace);
+      writeGitmemProjection(workspace, cfg.gitmemProjectionDir || 'companion', projection);
+      this.gitmemSignature = projection.signature;
+    } catch (error) {
+      this.host.log.warn('[companion] GitMem 投影失败', String(error));
     }
   }
 
@@ -1823,7 +1841,22 @@ export class CompanionWorld implements World {
       includeArchived: args.includeArchived === true,
       kinds: MEMORY_KINDS,
     });
-    if (!hits.length) return `记忆里没找到「${query}」。可以换个说法，或者直接问对方。`;
+    if (!hits.length) {
+      if (this.cfg().gitmemReadThrough) {
+        const legacy = searchGitmem(
+          workspaceFor(this.ctx.botDir, this.cfg().gitmemWorkspace),
+          query,
+          Math.min(5, limit),
+        );
+        if (legacy.length) {
+          this.mind('memory', `主库没命中，GitMem 旧档案命中 ${legacy.length} 条`, { query });
+          return ['主记忆没命中；以下是 GitMem 旧档案（只读，不是主库）：']
+            .concat(legacy.map((hit) => `[GitMem/${hit.path}:${hit.line}] ${hit.text}`))
+            .join('\n');
+        }
+      }
+      return `记忆里没找到「${query}」。可以换个说法，或者直接问对方。`;
+    }
     this.memoryStore.markUsed(hits.flatMap((hit) => (hit.id ? [hit.id] : [])));
     this.mind('memory', `检索「${query}」命中 ${hits.length} 条`, { query });
     const label: Record<string, string> = {

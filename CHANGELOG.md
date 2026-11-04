@@ -4,6 +4,7 @@
 
 - 主动回执识别 `pet_say` / `pet_ask` / `console_send` / `sovits_speak` 的参数为真正说出的内容；不再把“通过 speak 工具说话”误记成 silent。
 - 今日测试数据：15 次主动里 13 次实际走了 pet_say，旧回执误判为 silent、sentTexts 为空；修复后内容去重和面板回执才准确。
+- 新增可选 GitMem 桥：主库仍是 companion-memory/2；开启后生成 `workspace/companion/{MEMORY,SELF,THREADS,RECENT}.md` 只读投影；`companion_recall` 主库没命中时只读检索旧 notes/handoffs；不做双向同步。
 
 ## 0.4.3 — 2026-11-03
 

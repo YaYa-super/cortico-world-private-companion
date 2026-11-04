@@ -57,6 +57,14 @@ export interface CompanionConfig {
   weatherCity: string;
   /** 是否启用节日触发（固定公历 + nager.date 中国法定节假日）。 */
   holidayEnabled: boolean;
+  /** 是否把主记忆投影成 GitMem 工作区里的只读 Markdown。 */
+  gitmemBridgeEnabled: boolean;
+  /** GitMem 工作区路径；空 = <botDir>/workspace。 */
+  gitmemWorkspace: string;
+  /** 投影子目录，默认 companion。 */
+  gitmemProjectionDir: string;
+  /** 主记忆没命中时，是否只读检索旧 GitMem 工作区。 */
+  gitmemReadThrough: boolean;
   /** 心理活动日志级别：off 关闭，summary 只记决策摘要。 */
   mindLogLevel: 'off' | 'summary';
   /** 实验性：背景念头。off 关闭；shadow 只记念头；act 允许写日记/休息。 */
@@ -97,6 +105,10 @@ export const COMPANION_DEFAULTS: CompanionConfig = {
   weatherEnabled: false,
   weatherCity: '',
   holidayEnabled: false,
+  gitmemBridgeEnabled: false,
+  gitmemWorkspace: '',
+  gitmemProjectionDir: 'companion',
+  gitmemReadThrough: false,
   mindLogLevel: 'summary',
   cognitionMode: 'off',
   cognitionIntervalMin: 10,
@@ -291,6 +303,27 @@ export const COMPANION_CONFIG_GROUP: CompanionConfigGroup = {
         type: 'string',
         title: '天气城市',
         description: '例如「杭州」「北京」。只用于地理编码和天气查询；留空则不查询。',
+      },
+      'worlds.companion.gitmemBridgeEnabled': {
+        type: 'boolean',
+        title: 'GitMem 投影',
+        description: '主记忆仍是 companion-memory/2；开启后把人物、事实、话头、最近经历投影成 GitMem 工作区里的只读 Markdown。默认关闭。',
+        'x-hot': true,
+      },
+      'worlds.companion.gitmemWorkspace': {
+        type: 'string',
+        title: 'GitMem 工作区',
+        description: '留空 = <botDir>/workspace；也可填绝对路径。',
+      },
+      'worlds.companion.gitmemProjectionDir': {
+        type: 'string',
+        title: '投影子目录',
+        description: '相对 GitMem 工作区的子目录，默认 companion；只写这个目录。',
+      },
+      'worlds.companion.gitmemReadThrough': {
+        type: 'boolean',
+        title: '旧 GitMem 读穿',
+        description: '主记忆没命中时，只读检索 workspace 里的 notes/handoffs；不写入主库。默认关闭。',
       },
       'worlds.companion.holidayEnabled': {
         type: 'boolean',
