@@ -1183,7 +1183,7 @@ export class CompanionWorld implements World {
     if (!this.wakeTracking) return false;
     const direct = this.wakeText.trim();
     const toolSpeech = this.wakeToolSpeech();
-    const text = [direct, ...toolSpeech].filter(Boolean).join(' / ');
+    const text = [...new Set([direct, ...toolSpeech].filter(Boolean))].join(' / ');
     if (text) {
       this.noteSent(text, now, this.wakeTracking.reason);
       this.mind('spoken', `真的说了：${text.slice(0, 80)}`, {
