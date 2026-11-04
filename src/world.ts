@@ -28,7 +28,7 @@ import { MEMORY_KINDS, MemoryStore, scopeKey, type MemoryKind, type MemoryRecord
 import { isHumanEvent, scopeOfEvent } from './event-filter.ts';
 import { fetchWeather, weatherTrigger } from './weather.ts';
 import { fetchHolidays, fixedHolidays } from './holidays.ts';
-import { buildGitmemProjection, searchGitmem, workspaceFor, writeGitmemProjection } from './gitmem.ts';
+import { searchGitmem, workspaceFor } from './gitmem.ts';
 import {
   MAIN_KEY, appendJournal, ensureDir, journalPath, readJournal, readJson, writeJsonAtomic,
   type JournalEntry, type Profile, type ProfileMap,
@@ -90,7 +90,6 @@ export class CompanionWorld implements World {
   /** 本轮 proactive 里的工具调用名与参数，用来识别 pet_say 这类 speak 工具。 */
   private wakeTools: Array<{ id: string; name: string; args: string }> = [];
   private wakeReason = '';
-  private gitmemSignature = '';
   private pendingReviewIds: string[] = [];
 
   constructor(ctx: WorldContext<CompanionConfig>) {
@@ -138,22 +137,6 @@ export class CompanionWorld implements World {
       writeJsonAtomic(join(this.dataDir, PROFILES_FILE), this.profiles);
     } catch (error) {
       this.host?.log.warn('[companion] 状态落盘失败', String(error));
-    }
-    this.syncGitmemProjection();
-  }
-
-  /** 主记忆 → GitMem 只读投影；内容签名不变就不重写。 */
-  private syncGitmemProjection(): void {
-    const cfg = this.cfg();
-    if (!cfg.gitmemBridgeEnabled || !cfg.memoryEnabled || !this.host) return;
-    try {
-      const projection = buildGitmemProjection(this.memoryStore.entries());
-      if (projection.signature === this.gitmemSignature) return;
-      const workspace = workspaceFor(this.ctx.botDir, cfg.gitmemWorkspace);
-      writeGitmemProjection(workspace, cfg.gitmemProjectionDir || 'companion', projection);
-      this.gitmemSignature = projection.signature;
-    } catch (error) {
-      this.host.log.warn('[companion] GitMem 投影失败', String(error));
     }
   }
 

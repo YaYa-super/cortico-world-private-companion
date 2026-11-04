@@ -29,7 +29,7 @@ npm：`cortico-world-private-companion` · 当前 `0.4.3`（已发布）；`0.4.
 | 复习与遗忘 | ✅ | `useCount` 强化 + 自适应半衰期；夜间复习队列；相似 episode 合并成摘要（原文归档、`mergedFrom` 可回查） |
 | 胡思乱想 | ✅ | 空闲时基于人物/约定/最近经历写低权重 `episode`（tag `musing`），每天 1-2 次；不进默认上下文，可检索 |
 | 记忆导入导出 | ✅ | 版本化 bundle（`companion-memory/2`）；`companion_memory` 的 stats/export/import/prune/forget；导入隔离区 + CLI 审核；v1→v2 迁移脚本 |
-| GitMem 桥 | ⚠️ 可选 | 主库仍是 `companion-memory/2`；开启后把人物/事实/话头/最近经历投影成 `workspace/companion/*.md`，主库没命中时可只读检索旧 `notes/handoffs`；不双向同步 |
+| GitMem 读穿 | ⚠️ 可选 | 主库仍是 `companion-memory/2`；主库没命中时只读检索旧 GitMem 的 `notes/handoffs`，不写回、不投影、不双向同步 |
 | 原插件的记忆引擎 | ❌（未照搬） | 原插件 7.x 自带独立 SQLite 记忆（来源记忆/画像/共同经历 + 混合召回 + 每日反思）。本移植没有沿用它的实现，而是内置了自己的记忆库（0.2.0），旧数据可以用脚本导入 |
 | 说话分寸 | ✅ | 一段可编辑的环境提示词（`ENV_PROMPT.md`），进 system 前缀 |
 | 人格本身 | ❌（不归它管） | 人格仍由 `CONSTITUTION.md` 提供；本扩展只加“过日子”的那一层 |
@@ -95,10 +95,8 @@ node "D:\Coopanion\resources\app\node_modules\pnpm\bin\pnpm.cjs" install --no-fr
 | `weatherEnabled` | false | 开启天气触发（Open-Meteo，免费；需填城市） |
 | `weatherCity` | 空 | 天气城市名，例如「杭州」「北京」；留空不查询 |
 | `holidayEnabled` | false | 节日触发（固定公历 + nager.date 中国法定节假日） |
-| `gitmemBridgeEnabled` | false | 把主记忆投影成 GitMem 工作区里的只读 Markdown |
 | `gitmemWorkspace` | 空 | GitMem 工作区；空 = `<botDir>/workspace` |
-| `gitmemProjectionDir` | companion | 投影子目录，只写这个目录 |
-| `gitmemReadThrough` | false | 主库没命中时只读检索旧 GitMem 的 notes/handoffs |
+| `gitmemReadThrough` | false | 主库没命中时只读检索旧 GitMem 的 notes/handoffs；不投影、不写回 |
 | `cognitionContactMode` | hold | 实验性：contact 意图到期后 hold（只记）或 send（过复核后发送） |
 | 夜间补跑 | 自动 | 03:30 错过时 08:00 后补跑；archive-only 不记完成，30 分钟退避重试 |
 | `styleNote` | 空 | 追加到环境提示词末尾的风格补充 |
