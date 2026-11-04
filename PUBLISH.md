@@ -31,7 +31,7 @@ npm view cortico-world-private-companion dist.tarball
 本机直连 npmjs 很慢（实测 35–41 KiB/s），但包约 200 KB，发布本身够用；不要因此把 registry 改成镜像。
 
 **发布后的一分钟别慌**：`npm publish` 会提示 “being processed”，此时 `npm view <pkg> version` 可能只看到
-`0.0.0-stage`（npm 的暂存占位，353 B），`latest` 还没指过去。实测约 1 分钟后 `dist-tags.latest` 变成 `0.4.3`，
+`0.0.0-stage`（npm 的暂存占位，353 B），`latest` 还没指过去。实测约 1 分钟后 `dist-tags.latest` 变成 `0.4.4`，
 `versions` 里同时留着 `0.0.0-stage`——这是正常的，**不要重复 publish**。
 
 ## 之后每次更新
@@ -81,4 +81,4 @@ npm deprecate cortico-world-private-companion@0.1.1 "回退到 0.1.0：主动频
 npm version 0.1.2 && npm publish
 ```
 
-Coopanion 侧把依赖改回 `^0.4.3`，重装并重启即可（数据目录不受影响）。
+Coopanion 侧把依赖改回 `^0.4.4`，重装并重启即可（数据目录不受影响）。
