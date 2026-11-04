@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.5 — 2026-11-05
+
+- 环境提示词给模型注入 workspace 绝对路径；QQ 发图/文件必须用绝对路径，避免 OneBot 以 `is a relative path` 拒绝 `blobs/...`。
+
 ## 0.4.4 — 2026-11-04
 
 - 主动回执识别 `pet_say` / `pet_ask` / `console_send` / `sovits_speak` 的参数为真正说出的内容；不再把“通过 speak 工具说话”误记成 silent。
