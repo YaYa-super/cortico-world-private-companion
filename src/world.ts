@@ -86,6 +86,8 @@ export class CompanionWorld implements World {
   private wakeTracking: { at: string; lastAt: string; reason: string } | null = null;
   private wakeText = '';
   private wakeHadTool = false;
+  /** 本轮 proactive 里的工具调用名与参数，用来识别 pet_say 这类 speak 工具。 */
+  private wakeTools: Array<{ id: string; name: string; args: string }> = [];
   private wakeReason = '';
   private pendingReviewIds: string[] = [];
 
@@ -482,9 +484,22 @@ export class CompanionWorld implements World {
         if (event.type === 'response.output_text.delta') {
           const delta = (event as { delta?: string }).delta;
           if (delta) this.wakeText += delta;
-        } else if (event.type === 'response.output_item.added'
-          && (event as { item?: { type?: string } }).item?.type === 'function_call') {
-          this.wakeHadTool = true;
+        } else if (event.type === 'response.output_item.added') {
+          const item = (event as { item?: { id?: string; type?: string; name?: string } }).item;
+          if (item?.type === 'function_call') {
+            this.wakeHadTool = true;
+            this.wakeTools.push({ id: String(item.id ?? ''), name: String(item.name ?? ''), args: '' });
+          }
+        } else if (event.type === 'response.function_call_arguments.delta') {
+          const e = event as { item_id?: string; delta?: string };
+          const tool = this.wakeTools.find((item) => item.id === e.item_id)
+            ?? this.wakeTools[this.wakeTools.length - 1];
+          if (tool && e.delta) tool.args += e.delta;
+        } else if (event.type === 'response.function_call_arguments.done') {
+          const e = event as { item_id?: string; arguments?: string };
+          const tool = this.wakeTools.find((item) => item.id === e.item_id)
+            ?? this.wakeTools[this.wakeTools.length - 1];
+          if (tool && typeof e.arguments === 'string') tool.args = e.arguments;
         }
       },
       onAbort: (reason) => {
@@ -517,6 +532,7 @@ export class CompanionWorld implements World {
     };
     this.wakeText = '';
     this.wakeHadTool = false;
+    this.wakeTools = [];
   }
 
   /** 一轮对话结束：先结算 proactive 回执，再记“刚说过话”。 */
@@ -1164,12 +1180,15 @@ export class CompanionWorld implements World {
   /** 结算一次 proactive 的模型输出回执：有可见正文才算“说了”。 */
   private finalizeWake(now: Date): boolean {
     if (!this.wakeTracking) return false;
-    const text = this.wakeText.trim();
+    const direct = this.wakeText.trim();
+    const toolSpeech = this.wakeToolSpeech();
+    const text = [direct, ...toolSpeech].filter(Boolean).join(' / ');
     if (text) {
       this.noteSent(text, now, this.wakeTracking.reason);
       this.mind('spoken', `真的说了：${text.slice(0, 80)}`, {
         chars: text.length,
         reason: this.wakeTracking.reason.slice(0, 80),
+        ...(toolSpeech.length ? { via: 'pet_say' } : {}),
       });
     } else if (this.wakeHadTool) {
       this.mind('silent', '唤醒了，但只调用了工具，没有可见正文', {
@@ -1184,10 +1203,30 @@ export class CompanionWorld implements World {
     return true;
   }
 
+  /** 从 pet_say / pet_ask / console_send / sovits_speak 的参数里取出真正说出的文本。 */
+  private wakeToolSpeech(): string[] {
+    const out: string[] = [];
+    for (const tool of this.wakeTools) {
+      let args: Record<string, unknown>;
+      try {
+        args = JSON.parse(tool.args || '{}') as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      const text = tool.name === 'pet_say' ? args.script
+        : tool.name === 'pet_ask' ? args.question
+          : tool.name === 'console_send' || tool.name === 'sovits_speak' ? (args.text ?? args.script)
+            : undefined;
+      if (typeof text === 'string' && text.trim()) out.push(text.trim());
+    }
+    return out;
+  }
+
   private clearWake(): void {
     this.wakeTracking = null;
     this.wakeText = '';
     this.wakeHadTool = false;
+    this.wakeTools = [];
   }
 
   /** 同一 thread 每天最多真正联系一次（投递成功后才写）。 */

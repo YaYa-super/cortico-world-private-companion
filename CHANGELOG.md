@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.4 — 2026-11-04
+
+- 主动回执识别 `pet_say` / `pet_ask` / `console_send` / `sovits_speak` 的参数为真正说出的内容；不再把“通过 speak 工具说话”误记成 silent。
+- 今日测试数据：15 次主动里 13 次实际走了 pet_say，旧回执误判为 silent、sentTexts 为空；修复后内容去重和面板回执才准确。
+
 ## 0.4.3 — 2026-11-03
 
 - 最近记忆拆成「你的情绪」和「我当时的感受」两列：前者来自 userEmotion，后者来自 howIFelt；没有则显示未标注/未记录。
