@@ -5,7 +5,7 @@
 > 把 AstrBot 插件 [`astrbot_plugin_private_companion`](https://github.com/menglimi/astrbot_plugin_private_companion)（中文名同样是「我会永远陪着你」）里
 > **“有自己的生活、会在合适的时候主动开口”** 这套机制，独立实现成 Coopanion 的 World 扩展。
 
-npm：`cortico-world-private-companion` · 当前 `0.4.4`（已发布）；`0.4.5` 已实现、待发布（本地自然日、同主语版本、memory_read/timeline）。本次包含最近记忆两列、回执区分、thread/内容去重与认知行动修复。首次升级请先备份 `records.json`/`.bak`/`state.json`。
+npm：`cortico-world-private-companion` · 当前 `0.4.4`（已发布）；`0.4.5` 已实现、待发布（本地自然日、同主语版本、memory_read/timeline）。首次升级请先备份 `records.json`/`.bak`/`state.json`。
 
 ## 致谢与来源
 
@@ -108,9 +108,11 @@ node "D:\Coopanion\resources\app\node_modules\pnpm\bin\pnpm.cjs" install --no-fr
 - `companion_agenda` — 读/改今日节目单
 - `companion_profile` — 读/写关系卡（`action=list` 列出所有卡）
 - `companion_journal` — 写/读日记
-- `companion_remember` — 写入记忆：`episode`（可带 `userEmotion`）/ `fact` / `person` / `thread` / `self` / `rule`；`tags: ["musing"]` 表示胡思乱想
+- `companion_remember` — 写入记忆：`episode`（可带 `userEmotion`）/ `fact` / `person` / `thread` / `self` / `rule`；`tags: ["musing"]` 表示胡思乱想；`subjectKey` 用于同一事实/话头的新旧版本归并
 - `companion_thread` — 收尾/更新未完成话头（`done` / `cancel` / `update`），配合 follow-up 复核
 - `companion_recall` — 在记忆库里检索（记录 + 最近捕获的对话；`includeArchived` 可翻合并前的原文）
+- `companion_memory_read` — 按 id 读完整记忆与版本历史
+- `companion_memory_timeline` — 按 `subjectKey` 看同一件事的时间线
 - `companion_memory` — 维护：`stats` / `export` / `import` / `prune` / `forget`（import 只读 `data/private-companion/imports/` 下的 `.json`）
 - `companion_consolidate` — 夜间整理：`plan` 取材料，`apply` 提交 0-6 条记录
 - `companion_proactive` — 检查现在会不会开口、被什么拦着；`trigger` 仅供测试
