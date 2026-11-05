@@ -6,6 +6,7 @@ import { test } from 'node:test';
 
 import { detectEmotion, relatedWords } from '../src/emotion.ts';
 import { MemoryStore } from '../src/memory-store.ts';
+import { startOfLocalDayMs } from '../src/time.ts';
 
 function fresh(): MemoryStore {
   const dir = mkdtempSync(join(tmpdir(), 'companion-v04-'));
@@ -45,6 +46,28 @@ test('todayDigest：只收今天的 episode，排除 musing/legacy', () => {
   assert.match(digest, /一起看了海/);
   assert.doesNotMatch(digest, /胡思乱想/);
   assert.doesNotMatch(digest, /旧聊天/);
+});
+
+test('todayEpisodes 按本地自然日切，不把前一天 23 点算进今天', () => {
+  const store = fresh();
+  const old = store.add({ kind: 'episode', text: '昨天深夜的事', importance: 0.6 });
+  const freshOne = store.add({ kind: 'episode', text: '今天早上的事', importance: 0.6 });
+  store.entries().find((record) => record.id === old.id)!.ts = '2026-11-04T23:00:00+08:00';
+  store.entries().find((record) => record.id === freshOne.id)!.ts = '2026-11-05T08:00:00+08:00';
+  const start = startOfLocalDayMs(new Date('2026-11-05T09:00:00+08:00'), 'Asia/Shanghai');
+  const rows = store.todayEpisodes(5, undefined, start);
+  assert.equal(rows.some((record) => record.id === old.id), false);
+  assert.equal(rows.some((record) => record.id === freshOne.id), true);
+  assert.doesNotMatch(store.todayDigest(5, undefined, start, 'Asia/Shanghai'), /昨天深夜/);
+});
+
+test('todayDigest 没有 episode 时只留时间，不带私聊原文', () => {
+  const store = fresh();
+  store.appendEvents([{ text: '这是一条很私密的私聊原话', scope: 'main', ts: '2026-11-05T08:00:00+08:00' }]);
+  const start = startOfLocalDayMs(new Date('2026-11-05T09:00:00+08:00'), 'Asia/Shanghai');
+  const digest = store.todayDigest(5, 'main', start, 'Asia/Shanghai');
+  assert.match(digest, /今天有 1 条对话/);
+  assert.doesNotMatch(digest, /私聊原话/);
 });
 
 test('emotionEcho：同 scope、同情绪、至少一天前', () => {

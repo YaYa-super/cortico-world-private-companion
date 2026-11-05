@@ -33,7 +33,7 @@ import {
   MAIN_KEY, appendJournal, ensureDir, journalPath, readJournal, readJson, writeJsonAtomic,
   type JournalEntry, type Profile, type ProfileMap,
 } from './store.ts';
-import { formatLocal, hmToMinutes, humanSpan, inWindow, localParts } from './time.ts';
+import { formatLocal, hmToMinutes, humanSpan, inWindow, localParts, startOfLocalDayMs } from './time.ts';
 
 const ENV_PROMPT_FILE = fileURLToPath(new URL('../ENV_PROMPT.md', import.meta.url));
 const TICK_MS = 60_000;
@@ -1011,7 +1011,7 @@ export class CompanionWorld implements World {
         const hasJournal = readJournal(this.dataDir, 500)
           .some((entry) => formatLocal(entry.ts, this.tz()).slice(0, 10) === p.date);
         if (!hasJournal) {
-          const digest = this.memoryStore.todayDigest(3, this.activeScope()).slice(0, 300);
+          const digest = this.memoryStore.todayDigest(3, this.activeScope(), startOfLocalDayMs(now, this.tz()), this.tz()).slice(0, 300);
           appendJournal(this.dataDir, {
             ts: now.toISOString(),
             kind: 'thought',
@@ -2037,14 +2037,17 @@ export class CompanionWorld implements World {
     if (!this.cfg().memoryEnabled) return { rules: [], recent: [] };
     const cfg = this.cfg();
     const scope = this.activeScope();
+    const now = new Date();
+    const todayStart = startOfLocalDayMs(now, this.tz());
     const rules = this.memoryStore.rules(cfg.memoryNotesInPrompt);
     const person = this.memoryStore.people()[0];
-    const workingRecords = cfg.workingMemoryInPrompt !== false ? this.memoryStore.todayEpisodes(3, scope) : [];
+    const workingRecords = cfg.workingMemoryInPrompt !== false
+      ? this.memoryStore.todayEpisodes(3, scope, todayStart) : [];
     const workingIds = new Set(workingRecords.map((record) => record.id));
     const working = cfg.workingMemoryInPrompt !== false
       ? (workingRecords.length
         ? workingRecords.map((record) => record.text.slice(0, 60)).join('；')
-        : this.memoryStore.todayDigest(3, scope))
+        : this.memoryStore.todayDigest(3, scope, todayStart, this.tz()))
       : '';
     const recent = this.memoryStore.recent(6, scope)
       .filter((record) => !workingIds.has(record.id))
@@ -2068,7 +2071,7 @@ export class CompanionWorld implements World {
       echoId: echo?.id,
       echoEventId: echo?.eventId,
       ...(followup ? { followup } : {}),
-      recent: recent.map((record) => record.text.slice(0, 120)),
+      recent: recent.map((record) => `${formatLocal(record.ts, this.tz()).slice(0, 10)} ${record.text.slice(0, 120)}`),
     };
   }
 

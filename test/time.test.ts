@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { hmToMinutes, humanSpan, inWindow, localParts, minutesToHm } from '../src/time.ts';
+import { hmToMinutes, humanSpan, inWindow, localParts, minutesToHm, startOfLocalDayMs } from '../src/time.ts';
 
 test('hmToMinutes 解析合法时刻，拒绝非法值', () => {
   assert.equal(hmToMinutes('08:30'), 510);
@@ -41,4 +41,11 @@ test('localParts 按部署时区换算', () => {
   assert.equal(p.minute, 30);
   assert.equal(p.weekday, '周四');
   assert.equal(p.minutes, 19 * 60 + 30);
+});
+
+test('startOfLocalDayMs 按部署时区切自然日', () => {
+  const start = startOfLocalDayMs(new Date('2026-11-05T09:00:00+08:00'), 'Asia/Shanghai');
+  assert.equal(new Date(start).toISOString(), '2026-11-04T16:00:00.000Z');
+  const before = startOfLocalDayMs(new Date('2026-11-05T00:01:00+08:00'), 'Asia/Shanghai');
+  assert.equal(new Date(before).toISOString(), '2026-11-04T16:00:00.000Z');
 });

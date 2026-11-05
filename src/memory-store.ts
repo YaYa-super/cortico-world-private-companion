@@ -14,6 +14,7 @@ import {
   readdirSync, renameSync, rmSync, statSync, writeFileSync, writeSync,
 } from 'node:fs';
 import { join } from 'node:path';
+import { formatLocal } from './time.ts';
 
 export const MEMORY_SCHEMA = 'companion-memory/2';
 /** 兼容 0.3.x 导出的旧 bundle；读取时按现有 kind 映射。 */
@@ -974,8 +975,8 @@ export class MemoryStore {
   }
 
   /** 最近 N 小时的人话事件（巩固计划用）。 */
-  recentEvents(hours = 24, limit = 40): RawEvent[] {
-    const cutoff = Date.now() - Math.max(1, hours) * 3_600_000;
+  recentEvents(hours = 24, limit = 40, sinceMs?: number): RawEvent[] {
+    const cutoff = Number.isFinite(sinceMs) ? Number(sinceMs) : Date.now() - Math.max(1, hours) * 3_600_000;
     return this.events
       .filter((event) => Date.parse(event.ts) >= cutoff)
       .slice(-Math.max(1, limit));
@@ -1003,9 +1004,9 @@ export class MemoryStore {
       .slice(0, Math.max(0, limit));
   }
 
-  /** 近 24h 的 episode（工作记忆与 recent 去重用）。 */
-  todayEpisodes(limit = 3, scope?: string): MemoryRecord[] {
-    const cutoff = Date.now() - 86_400_000;
+  /** 部署时区当天 00:00 之后的 episode（工作记忆与 recent 去重用）。 */
+  todayEpisodes(limit = 3, scope?: string, sinceMs = Date.now() - 86_400_000): MemoryRecord[] {
+    const cutoff = Number.isFinite(sinceMs) ? Number(sinceMs) : Date.now() - 86_400_000;
     return this.records
       .filter((record) => record.kind === 'episode' && record.reviewStatus === 'approved'
         && !record.archived && Date.parse(record.ts) >= cutoff
@@ -1016,16 +1017,15 @@ export class MemoryStore {
       .slice(0, Math.max(1, limit));
   }
 
-  /** 今天聊过什么：近 24h 的 episode 摘要，给“工作记忆”用。 */
-  todayDigest(limit = 3, scope?: string): string {
-    const rows = this.todayEpisodes(limit, scope);
+  /** 今天聊过什么：当天 episode 摘要；没有 episode 时只报时间，不把私聊原文带进提示。 */
+  todayDigest(limit = 3, scope?: string, sinceMs = Date.now() - 86_400_000, tz = 'UTC'): string {
+    const rows = this.todayEpisodes(limit, scope, sinceMs);
     if (rows.length) return rows.map((record) => record.text.replace(/\s+/g, ' ').slice(0, 60)).join('；');
-    // 还没写成 episode 时，用今天捕获的人话兜底，别让“今天”空着。
-    return this.recentEvents(24, Math.max(3, limit))
-      .filter((event) => !scope || scopeKey(event.scope) === scopeKey(scope))
-      .slice(-Math.max(1, limit))
-      .map((event) => event.text.replace(/\s+/g, ' ').slice(0, 50))
-      .join('；');
+    const events = this.recentEvents(24, Math.max(3, limit), sinceMs)
+      .filter((event) => !scope || scopeKey(event.scope) === scopeKey(scope));
+    if (!events.length) return '';
+    const times = events.map((event) => formatLocal(event.ts, tz).slice(11, 16));
+    return `今天有 ${events.length} 条对话（${times[0]}–${times[times.length - 1]}）`;
   }
 
   /** 重要但正在变淡的记录：夜间复习队列。 */

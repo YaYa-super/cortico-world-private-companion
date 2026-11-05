@@ -50,6 +50,23 @@ export function localParts(now: Date, timeZone: string): LocalParts {
   };
 }
 
+/** 部署时区当天 00:00 的绝对毫秒时间；用迭代校正时区偏移，兼容 DST。 */
+export function startOfLocalDayMs(now: Date, timeZone: string): number {
+  const p = localParts(now, timeZone);
+  const [year, month, day] = p.date.split('-').map(Number);
+  const target = Date.UTC(year, month - 1, day, 0, 0, 0);
+  let ts = target;
+  for (let i = 0; i < 3; i += 1) {
+    const q = localParts(new Date(ts), timeZone);
+    const [qy, qm, qd] = q.date.split('-').map(Number);
+    const displayed = Date.UTC(qy, qm - 1, qd, q.hour, q.minute, 0);
+    const diff = displayed - target;
+    if (diff === 0) break;
+    ts -= diff;
+  }
+  return ts;
+}
+
 /** "HH:MM" → 当天分钟数；格式不对返回 null。 */
 export function hmToMinutes(hm: string): number | null {
   const m = /^(\d{1,2}):(\d{2})$/.exec(String(hm ?? '').trim());

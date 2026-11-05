@@ -39,7 +39,7 @@ export function buildContextText(input: ContextInput): string {
     if (input.memory.working) lines.push(`今天：${input.memory.working}`);
     if (input.memory.echo) lines.push(`情绪回声（只是提示，不一定说）：${input.memory.echo}`);
     if (input.memory.followup) lines.push(`待复核话头（判断完成/取消/更新，不要重复追问）：${input.memory.followup}`);
-    if (input.memory.recent.length) lines.push(`最近：${input.memory.recent.map((n) => n.slice(0, 80)).join('；')}`);
+    if (input.memory.recent.length) lines.push(`最近（按时间，可能跨天）：${input.memory.recent.map((n) => n.slice(0, 80)).join('；')}`);
   }
   if (input.journal.length) {
     lines.push(`最近日记：${input.journal.map((entry) => { const short = entry.text.length > 80 ? `${entry.text.slice(0, 80)}…` : entry.text; return `${formatLocal(entry.ts, tz)} ${entry.kind}：${short}`; }).join('；')}`);
