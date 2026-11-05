@@ -196,6 +196,10 @@ export class CompanionWorld implements World {
         return this.toolThread(args);
       case 'companion_consolidate':
         return this.toolConsolidate(args);
+      case 'companion_memory_read':
+        return this.toolMemoryRead(args);
+      case 'companion_memory_timeline':
+        return this.toolMemoryTimeline(args);
       default:
         return Promise.resolve(`未知工具 ${name}`);
     }
@@ -1846,7 +1850,43 @@ export class CompanionWorld implements World {
       episode: '经历', fact: '事实', person: '人物', thread: '约定', self: '自我', rule: '规则',
     };
     return hits
-      .map((hit) => `[${label[hit.kind] ?? hit.kind}/${hit.scope}] ${hit.ts.slice(0, 10)} ${hit.snippet}`)
+      .map((hit) => `[${label[hit.kind] ?? hit.kind}/${hit.scope}] ${hit.ts.slice(0, 10)}${hit.id ? ` (${hit.id})` : ''} ${hit.snippet}`)
+      .join('\n');
+  }
+
+  private async toolMemoryRead(args: Record<string, unknown>): Promise<string | ToolOutcome> {
+    if (!this.cfg().memoryEnabled) return '内置记忆已关闭（设置 → 我会永远陪着你 → 内置记忆）。';
+    const id = trimText(args.id, 128);
+    if (!id) return this.fail('要读哪条？id 不能为空。');
+    const record = this.memoryStore.read(id);
+    if (!record) return this.fail(`没找到记忆 ${id.slice(0, 12)}。`);
+    const versions = record.versions?.length
+      ? record.versions
+      : [{ version: record.version ?? 1, text: record.text, observedAt: record.ts, status: record.details?.status }];
+    const lines = [
+      `记忆 ${record.id}`,
+      `类型：${record.kind} · 域：${record.scope} · 版本：${record.version ?? 1} · 时间：${formatLocal(record.ts, this.tz())}`,
+      `当前：${record.text}`,
+    ];
+    if (record.details?.status) lines.push(`状态：${record.details.status}`);
+    if (record.details?.what) lines.push(`话头：${record.details.what}`);
+    lines.push('版本历史：');
+    for (const version of versions) {
+      lines.push(`- v${version.version} ${version.observedAt.slice(0, 16)}${version.status ? ` [${version.status}]` : ''} ${version.text.slice(0, 220)}`);
+    }
+    return lines.join('\n');
+  }
+
+  private toolMemoryTimeline(args: Record<string, unknown>): string {
+    if (!this.cfg().memoryEnabled) return '内置记忆已关闭（设置 → 我会永远陪着你 → 内置记忆）。';
+    const subjectKey = trimText(args.subjectKey, 120);
+    if (!subjectKey) return this.fail('要查哪个主语？subjectKey 不能为空。');
+    const scopeArg = trimText(args.scope, 40);
+    const rows = this.memoryStore.timeline(subjectKey, scopeArg === '*' ? undefined : (scopeArg || this.activeScope()));
+    if (!rows.length) return `没有找到主语「${subjectKey}」的时间线。`;
+    this.mind('memory', `时间线「${subjectKey}」${rows.length} 个版本`, { subjectKey });
+    return rows
+      .map((row) => `${row.observedAt.slice(0, 16)} [${row.kind}${row.status ? `/${row.status}` : ''} v${row.version}] ${row.text}`)
       .join('\n');
   }
 
@@ -1905,8 +1945,14 @@ export class CompanionWorld implements World {
       source: musing ? 'muse' : 'tool',
       tags,
       details: enriched as never,
+      ...(trimText(args.subjectKey, 120) ? { subjectKey: trimText(args.subjectKey, 120) } : {}),
     });
     if (!result.added) return `这条已经记过了（${kind}，id ${result.id.slice(0, 8)}），没有重复写入。`;
+    if (result.updated) {
+      this.snapshot?.invalidate();
+      this.mind('memory', `更新 ${kind}（同主语）：${text.slice(0, 40)}`, { memoryId: result.id, kind });
+      return `这条已有同主语的旧版本，已更新为当前版本（${kind}，id ${result.id.slice(0, 8)}）；旧版本保留。`;
+    }
     this.snapshot?.invalidate();
     this.mind('memory', `${musing ? '胡思乱想' : '记住'} ${kind}：${text.slice(0, 40)}`, {
       memoryId: result.id,

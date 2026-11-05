@@ -63,6 +63,17 @@ export interface MemoryDetails {
   merged?: boolean;
 }
 
+export interface MemoryVersion {
+  version: number;
+  text: string;
+  status?: 'open' | 'done' | 'dropped';
+  observedAt: string;
+  validFrom?: string;
+  validTo?: string;
+  reason?: string;
+  sourceEventIds?: string[];
+}
+
 export interface MemoryRecord {
   id: string;
   kind: MemoryKind;
@@ -85,6 +96,13 @@ export interface MemoryRecord {
   bundleId?: string;
   details?: MemoryDetails;
   provenance?: Record<string, unknown>;
+  /** 同一件事实/话头的稳定主语；用于版本归并，不要求所有记录都有。 */
+  subjectKey?: string;
+  /** 当前版本号；缺省视为 1。 */
+  version?: number;
+  /** 历史版本；当前正文仍是 record.text，不把历史注入上下文。 */
+  versions?: MemoryVersion[];
+  updatedAt?: string;
 }
 
 export interface RawEvent {
@@ -120,6 +138,8 @@ export interface AddResult {
   added: boolean;
   id: string;
   duplicateOf?: string;
+  /** 同 subjectKey 的已有记录被更新，而不是新增。 */
+  updated?: boolean;
 }
 
 export interface ImportResult {
@@ -265,6 +285,30 @@ function shortStr(value: unknown, len = 120): string | undefined {
 }
 function numOr(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function cleanVersions(raw: unknown): MemoryVersion[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out: MemoryVersion[] = [];
+  for (const item of raw.slice(-20)) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const d = item as Record<string, unknown>;
+    const text = shortStr(d.text, 6000);
+    const version = Math.max(1, Math.floor(Number(d.version) || 1));
+    const observedAt = shortStr(d.observedAt, 40) ?? shortStr(d.ts, 40);
+    if (!text || !observedAt) continue;
+    out.push({
+      version,
+      text,
+      ...(d.status === 'open' || d.status === 'done' || d.status === 'dropped' ? { status: d.status } : {}),
+      observedAt,
+      ...(shortStr(d.validFrom, 40) ? { validFrom: shortStr(d.validFrom, 40) } : {}),
+      ...(shortStr(d.validTo, 40) ? { validTo: shortStr(d.validTo, 40) } : {}),
+      ...(shortStr(d.reason, 120) ? { reason: shortStr(d.reason, 120) } : {}),
+      ...(strArray(d.sourceEventIds, 20, 64) ? { sourceEventIds: strArray(d.sourceEventIds, 20, 64) } : {}),
+    });
+  }
+  return out.length ? out : undefined;
 }
 const EMOTION_ALIASES: Record<string, string> = {
   累: '疲惫', 累死: '疲惫', 疲劳: '疲惫', 疲惫: '疲惫', 困: '疲惫',
@@ -538,6 +582,10 @@ export class MemoryStore {
       bundleId: typeof item.bundleId === 'string' ? item.bundleId : undefined,
       details: cleanDetails(kind, item.details),
       provenance: cleanProvenance(item.provenance),
+      ...(shortStr(item.subjectKey, 120) ? { subjectKey: shortStr(item.subjectKey, 120) } : {}),
+      version: Math.max(1, Math.floor(Number(item.version) || 1)),
+      ...(cleanVersions(item.versions) ? { versions: cleanVersions(item.versions) } : {}),
+      ...(optionalIso(item.updatedAt) ? { updatedAt: optionalIso(item.updatedAt) } : {}),
     };
   }
 
@@ -617,10 +665,96 @@ export class MemoryStore {
     this.saveMeta();
   }
 
+  /** 同 subjectKey 的新状态写入已有记录，旧状态进 versions，不新增一条。 */
+  private applyVersion(existing: MemoryRecord, incoming: MemoryRecord): AddResult {
+    const current = existing.version ?? 1;
+    const versions = existing.versions?.length ? [...existing.versions] : [{
+      version: current,
+      text: existing.text,
+      ...(existing.kind === 'thread' && existing.details?.status ? { status: existing.details.status } : {}),
+      observedAt: existing.ts,
+      ...(existing.details?.validFrom ? { validFrom: existing.details.validFrom } : {}),
+    }];
+    const next = current + 1;
+    for (const version of versions) {
+      if (version.version === current && !version.validTo) version.validTo = incoming.ts;
+    }
+    versions.push({
+      version: next,
+      text: incoming.text,
+      ...(incoming.kind === 'thread' && incoming.details?.status ? { status: incoming.details.status } : {}),
+      observedAt: incoming.ts,
+      ...(incoming.details?.validFrom ? { validFrom: incoming.details.validFrom } : {}),
+      reason: '同 subjectKey 更新',
+    });
+    existing.version = next;
+    existing.versions = versions.slice(-20);
+    existing.text = incoming.text;
+    existing.details = incoming.details;
+    existing.ts = incoming.ts;
+    existing.updatedAt = nowIso();
+    existing.importance = Math.max(existing.importance, incoming.importance);
+    existing.tags = cleanTags([...existing.tags, ...incoming.tags]);
+    existing.archived = false;
+    this.rebuildHashIndex();
+    this.saveRecords();
+    return { added: true, id: existing.id, updated: true };
+  }
+
+  /** 按 id 读当前记录（完整正文、版本、来源）。 */
+  read(id: string): MemoryRecord | undefined {
+    return this.records.find((record) => record.id === id);
+  }
+
+  /** 同一 subjectKey 的所有版本，按 observedAt 排序。 */
+  timeline(subjectKey: string, scope?: string): Array<{
+    id: string; kind: MemoryKind; subjectKey: string; text: string;
+    status?: string; observedAt: string; version: number;
+  }> {
+    const key = String(subjectKey ?? '').trim();
+    if (!key) return [];
+    const out = [];
+    for (const record of this.records) {
+      if (record.subjectKey !== key || (scope && scopeKey(record.scope) !== scopeKey(scope))) continue;
+      const versions = record.versions?.length ? record.versions : [{
+        version: record.version ?? 1,
+        text: record.text,
+        observedAt: record.ts,
+        ...(record.kind === 'thread' && record.details?.status ? { status: record.details.status } : {}),
+      }];
+      for (const version of versions) {
+        out.push({
+          id: record.id,
+          kind: record.kind,
+          subjectKey: key,
+          text: version.text,
+          ...(version.status ? { status: version.status } : {}),
+          observedAt: version.observedAt,
+          version: version.version,
+        });
+      }
+    }
+    return out.sort((a, b) => Date.parse(a.observedAt) - Date.parse(b.observedAt));
+  }
+
   add(input: Partial<MemoryRecord> & { text: string; kind?: MemoryKind }): AddResult {
     const list = this.prepare([input]);
     if (!list.records.length) return { added: false, id: '' };
     const record = list.records[0];
+    if (record.subjectKey && ['fact', 'thread', 'person'].includes(record.kind)) {
+      const sameSubject = this.records
+        .filter((item) => item.subjectKey === record.subjectKey
+          && item.kind === record.kind && !item.archived
+          && scopeKey(item.scope) === scopeKey(record.scope))
+        .sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts))[0];
+      if (sameSubject) {
+        const sameStatus = (sameSubject.details?.status ?? '') === (record.details?.status ?? '');
+        if (sameSubject.text === record.text && sameStatus) {
+          return { added: false, id: sameSubject.id, duplicateOf: sameSubject.id };
+        }
+        return this.applyVersion(sameSubject, record);
+      }
+    }
     const exact = this.byHash.get(hashText(record.kind, record.scope, record.text));
     if (exact) return { added: false, id: exact, duplicateOf: exact };
     const tokens = tokenize(record.text);
@@ -675,6 +809,10 @@ export class MemoryStore {
         bundleId: input.bundleId,
         details: cleanDetails(kind, input.details),
         provenance: cleanProvenance(input.provenance),
+        ...(shortStr(input.subjectKey, 120) ? { subjectKey: shortStr(input.subjectKey, 120) } : {}),
+        version: Math.max(1, Math.floor(Number(input.version) || 1)),
+        ...(cleanVersions(input.versions) ? { versions: cleanVersions(input.versions) } : {}),
+        ...(optionalIso(input.updatedAt) ? { updatedAt: optionalIso(input.updatedAt) } : {}),
       };
       records.push(record);
     }
@@ -1203,6 +1341,7 @@ export class MemoryStore {
   updateThread(id: string, patch: { status?: 'open' | 'done' | 'dropped'; what?: string; due?: string }): boolean {
     const record = this.records.find((item) => item.id === id && item.kind === 'thread');
     if (!record) return false;
+    const oldStatus = record.details?.status;
     record.details = cleanDetails('thread', {
       ...record.details,
       ...(patch.status ? { status: patch.status } : {}),
@@ -1210,6 +1349,25 @@ export class MemoryStore {
       ...(patch.due ? { due: patch.due } : {}),
       lastTouchedAt: new Date().toISOString(),
     });
+    if (patch.status && patch.status !== oldStatus) {
+      const current = record.version ?? 1;
+      const versions = record.versions?.length ? [...record.versions] : [{
+        version: current,
+        text: record.text,
+        ...(oldStatus ? { status: oldStatus } : {}),
+        observedAt: record.ts,
+      }];
+      versions.push({
+        version: current + 1,
+        text: record.text,
+        status: patch.status,
+        observedAt: new Date().toISOString(),
+        reason: 'thread 状态更新',
+      });
+      record.version = current + 1;
+      record.versions = versions.slice(-20);
+      record.updatedAt = new Date().toISOString();
+    }
     this.saveRecords();
     return true;
   }

@@ -5,7 +5,7 @@
 > 把 AstrBot 插件 [`astrbot_plugin_private_companion`](https://github.com/menglimi/astrbot_plugin_private_companion)（中文名同样是「我会永远陪着你」）里
 > **“有自己的生活、会在合适的时候主动开口”** 这套机制，独立实现成 Coopanion 的 World 扩展。
 
-npm：`cortico-world-private-companion` · 当前 `0.4.4`（已发布）；`0.4.5` 已实现、待发布（本地自然日与隐私兜底）。本次包含最近记忆两列、回执区分、thread/内容去重与认知行动修复。首次升级请先备份 `records.json`/`.bak`/`state.json`。
+npm：`cortico-world-private-companion` · 当前 `0.4.4`（已发布）；`0.4.5` 已实现、待发布（本地自然日、同主语版本、memory_read/timeline）。本次包含最近记忆两列、回执区分、thread/内容去重与认知行动修复。首次升级请先备份 `records.json`/`.bak`/`state.json`。
 
 ## 致谢与来源
 
@@ -28,6 +28,7 @@ npm：`cortico-world-private-companion` · 当前 `0.4.4`（已发布）；`0.4.
 | 内置记忆 | ✅ | 原始事件层 + 六类派生记录（episode/fact/person/thread/self/rule）；BM25（CJK 2-gram）+ 新近度 + 重要度 + 身份信息；规则常驻、人物摘要、工作记忆、情绪回声；完全重复与近似重复去重 |
 | 复习与遗忘 | ✅ | `useCount` 强化 + 自适应半衰期；夜间复习队列；相似 episode 合并成摘要（原文归档、`mergedFrom` 可回查） |
 | 胡思乱想 | ✅ | 空闲时基于人物/约定/最近经历写低权重 `episode`（tag `musing`），每天 1-2 次；不进默认上下文，可检索 |
+| 记忆版本 | ✅ | `subjectKey` 同主语更新为版本，旧版本保留；`companion_memory_read` 看全文/历史，`companion_memory_timeline` 看时间线 |
 | 记忆导入导出 | ✅ | 版本化 bundle（`companion-memory/2`）；`companion_memory` 的 stats/export/import/prune/forget；导入隔离区 + CLI 审核；v1→v2 迁移脚本 |
 | GitMem 读穿 | ⚠️ 可选 | 主库仍是 `companion-memory/2`；主库没命中时只读检索旧 GitMem 的 `notes/handoffs`，不写回、不投影、不双向同步 |
 | 原插件的记忆引擎 | ❌（未照搬） | 原插件 7.x 自带独立 SQLite 记忆（来源记忆/画像/共同经历 + 混合召回 + 每日反思）。本移植没有沿用它的实现，而是内置了自己的记忆库（0.2.0），旧数据可以用脚本导入 |
@@ -151,7 +152,7 @@ World 页新增「记忆」面板（`src/webui/client.js`）：
 ## 开发
 
 ```bash
-node --test            # 88 个用例：时区/状态/主动/记忆库（损坏恢复、去重、检索、隔离区、导出 scope、裁剪、事件过滤、情绪/复习/合并/musing）
+node --test            # 90 个用例：时区/状态/主动/记忆库（损坏恢复、去重、检索、隔离区、导出 scope、裁剪、事件过滤、情绪/复习/合并/musing）
 node tools/import-memory-extra.mjs --dry   # 预览从旧记忆库能导多少
 node tools/eval-memory.mjs                 # 32 问记忆评测：recall@3 / 纯度 / p95
 node tools/eval-persona.mjs                # 6 问人格卡评测（CONSTITUTION）

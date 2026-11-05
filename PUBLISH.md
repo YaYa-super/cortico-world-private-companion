@@ -12,7 +12,7 @@ cd "D:\文档\past_projects\coo-companion\packages\cortico-world-private-compani
 npm whoami            # 没登录会报错，先 npm login（浏览器/OTP）
 
 # 1) 发布前自检：prepublishOnly 也会做同样的事
-npm test              # 88 个用例
+npm test              # 90 个用例
 npm run describe      # 重新生成 describe.json（工具/事件清单）
 npm pack --dry-run    # 看文件清单：src/ assets/ describe.json ENV_PROMPT.md README LICENSE CHANGELOG
 

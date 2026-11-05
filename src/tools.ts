@@ -146,6 +146,7 @@ export const TOOL_SPECS: ToolSpec[] = [
         confidence: { type: 'number', minimum: 0, maximum: 1, description: '把握多大，缺省 0.75' },
         importance: { type: 'number', minimum: 0, maximum: 1, description: '有多重要，缺省 0.55' },
         tags: { type: 'array', items: { type: 'string' }, description: '可选标签；musing 表示这是自己胡思乱想的' },
+        subjectKey: { type: 'string', description: '同一件事实/话头的稳定主语，例如 video-plugin；同主语会更新版本而不是新增一条' },
         userEmotion: {
           type: 'object',
           description: '对方当时的情绪（可选）：{ label, cause, intensity }',
@@ -233,6 +234,27 @@ export const TOOL_SPECS: ToolSpec[] = [
     tags: ['read', 'write', 'flow'],
     usage: '通常由夜间提醒触发；对方没要求时不要主动整理。提交前先看 plan。',
   },
+  {
+    name: 'companion_memory_read',
+    description: '按 id 读一条完整记忆：当前正文、类型、版本历史、来源信息。用在 recall 只给片段、需要核对原文时。',
+    parameters: obj({ id: { type: 'string', description: '记忆 id；recall 结果会带 id' } }, ['id']),
+    tags: ['read'],
+    usage: '只在需要核对细节/版本时用；不要把整段原文念给对方听。',
+  },
+  {
+    name: 'companion_memory_timeline',
+    description: '按 subjectKey 看同一件事的时间线：每次更新、状态变化和当时正文。',
+    parameters: obj(
+      {
+        subjectKey: { type: 'string', description: '稳定主语，例如 video-plugin' },
+        scope: { type: 'string', description: '可选记忆域，缺省当前会话，* 表示全库' },
+      },
+      ['subjectKey'],
+    ),
+    tags: ['read'],
+    usage: '查“这件事之前是什么状态”时用；时间线不等于事实，注意版本时间。',
+  },
+
 ];
 
 /** 给人看的一句话（设置页与市场）。 */
@@ -246,5 +268,7 @@ export const TOOL_SUMMARIES: Record<string, string> = {
   companion_remember: '把值得记住的事写进内置记忆（含常驻笔记）。',
   companion_memory: '记忆库维护：统计、导入、导出、裁剪、精确删除。',
   companion_thread: '收尾/更新未完成话头，避免反复追问。',
+  companion_memory_read: '按 id 读完整记忆与版本历史。',
+  companion_memory_timeline: '按 subjectKey 看同一件事的时间线。',
   companion_consolidate: '夜间整理：取材料或提交 0-6 条结构化记忆。',
 };

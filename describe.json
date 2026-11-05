@@ -292,6 +292,10 @@
             },
             "description": "可选标签；musing 表示这是自己胡思乱想的"
           },
+          "subjectKey": {
+            "type": "string",
+            "description": "同一件事实/话头的稳定主语，例如 video-plugin；同主语会更新版本而不是新增一条"
+          },
           "userEmotion": {
             "type": "object",
             "description": "对方当时的情绪（可选）：{ label, cause, intensity }",
@@ -492,6 +496,52 @@
         "flow"
       ],
       "summary": "夜间整理：取材料或提交 0-6 条结构化记忆。"
+    },
+    {
+      "name": "companion_memory_read",
+      "description": "按 id 读一条完整记忆：当前正文、类型、版本历史、来源信息。用在 recall 只给片段、需要核对原文时。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "记忆 id；recall 结果会带 id"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "tags": [
+        "read"
+      ],
+      "summary": "按 id 读完整记忆与版本历史。"
+    },
+    {
+      "name": "companion_memory_timeline",
+      "description": "按 subjectKey 看同一件事的时间线：每次更新、状态变化和当时正文。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "subjectKey": {
+            "type": "string",
+            "description": "稳定主语，例如 video-plugin"
+          },
+          "scope": {
+            "type": "string",
+            "description": "可选记忆域，缺省当前会话，* 表示全库"
+          }
+        },
+        "required": [
+          "subjectKey"
+        ]
+      },
+      "tags": [
+        "read"
+      ],
+      "summary": "按 subjectKey 看同一件事的时间线。"
     }
   ],
   "events": [

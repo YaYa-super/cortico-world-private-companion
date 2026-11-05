@@ -70,6 +70,36 @@ test('todayDigest 没有 episode 时只留时间，不带私聊原文', () => {
   assert.doesNotMatch(digest, /私聊原话/);
 });
 
+test('subjectKey 更新旧记录而不是新增，版本历史保留', () => {
+  const store = fresh();
+  const first = store.add({ kind: 'fact', text: '视频插件还没做好', subjectKey: 'video-plugin', importance: 0.6 });
+  assert.equal(first.added, true);
+  const second = store.add({ kind: 'fact', text: '视频插件已经装好', subjectKey: 'video-plugin', importance: 0.7 });
+  assert.equal(second.added, true);
+  assert.equal(second.id, first.id);
+  const record = store.read(first.id)!;
+  assert.equal(record.text, '视频插件已经装好');
+  assert.equal(record.version, 2);
+  assert.equal(record.versions?.length, 2);
+  const timeline = store.timeline('video-plugin');
+  assert.equal(timeline.length, 2);
+  assert.equal(timeline[0].text, '视频插件还没做好');
+  assert.equal(timeline[1].text, '视频插件已经装好');
+});
+
+test('subjectKey 版本能跨重启保留', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'companion-version-'));
+  const first = new MemoryStore(join(dir, 'memory'));
+  const added = first.add({ kind: 'fact', text: '旧状态', subjectKey: 'reload-test' });
+  first.add({ kind: 'fact', text: '新状态', subjectKey: 'reload-test' });
+  first.close();
+  const second = new MemoryStore(join(dir, 'memory'));
+  const record = second.read(added.id)!;
+  assert.equal(record.text, '新状态');
+  assert.equal(record.versions?.length, 2);
+  second.close();
+});
+
 test('emotionEcho：同 scope、同情绪、至少一天前', () => {
   const store = fresh();
   const past = store.add({
