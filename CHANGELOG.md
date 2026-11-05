@@ -2,7 +2,6 @@
 
 ## 0.4.5 — 2026-11-05
 
-- 环境提示词给模型注入 workspace 绝对路径；QQ 发图/文件必须用绝对路径，避免 OneBot 以 `is a relative path` 拒绝 `blobs/...`。
 - 修复「今天」按最近 24h 串前一天：`todayEpisodes/todayDigest` 改为本地自然日 00:00 起；「最近」加日期并标明可能跨天。
 - 「今天」没有 episode 时只报对话条数与时间，不再把私聊原文整条带进提示。
 

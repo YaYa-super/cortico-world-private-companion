@@ -151,7 +151,6 @@ export class CompanionWorld implements World {
       : '主动联系：关闭（只在对方开口时回应，不主动找人）。';
     return {
       'companion.gates': gates,
-      'companion.workspace': join(this.ctx.botDir, 'workspace'),
       'companion.styleNote': trimText(cfg.styleNote, 600),
     };
   }
