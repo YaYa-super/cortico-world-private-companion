@@ -287,6 +287,42 @@ function numOr(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
+const SUBJECT_STOP = /爸爸|妈妈|他|她|我|你|想|要|给|说|答应|还没|已经|做好|没做好|一个|能看|看|的|了|还|没|做|装|帮|一直|这件|那件|上次|这次|有件|事/g;
+
+/**
+ * 保守推断 subjectKey：
+ * - thread：从 what/正文首句去掉口语前缀和常见动词，留下主题；
+ * - fact：只认显式 details.subject（不猜谓词，避免把同一主语的不同事实并掉）；
+ * - person：只认 details.personId。
+ * 推断不出来就不返回，宁可不去重。
+ */
+export function inferSubjectKey(
+  kind: MemoryKind,
+  text: string,
+  details?: MemoryDetails,
+): string | undefined {
+  if (kind === 'thread') {
+    const raw = String(details?.what ?? text ?? '');
+    const first = raw.split(/[（(；;，,。!?！？\n]/)[0] ?? raw;
+    const topic = first
+      .replace(SUBJECT_STOP, ' ')
+      .replace(/[「」“”"'`]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 36);
+    if (topic.length >= 2) return `thread:${topic.toLowerCase()}`;
+  }
+  if (kind === 'fact' && details?.subject) {
+    const subject = String(details.subject).replace(/\s+/g, ' ').trim().slice(0, 60);
+    if (subject) return `fact:${subject.toLowerCase()}`;
+  }
+  if (kind === 'person' && details?.personId) {
+    const id = String(details.personId).trim().slice(0, 64);
+    if (id) return `person:${id.toLowerCase()}`;
+  }
+  return undefined;
+}
+
 function cleanVersions(raw: unknown): MemoryVersion[] | undefined {
   if (!Array.isArray(raw)) return undefined;
   const out: MemoryVersion[] = [];
@@ -809,7 +845,9 @@ export class MemoryStore {
         bundleId: input.bundleId,
         details: cleanDetails(kind, input.details),
         provenance: cleanProvenance(input.provenance),
-        ...(shortStr(input.subjectKey, 120) ? { subjectKey: shortStr(input.subjectKey, 120) } : {}),
+        ...(shortStr(input.subjectKey, 120)
+          ? { subjectKey: shortStr(input.subjectKey, 120) }
+          : (inferSubjectKey(kind, text, cleanDetails(kind, input.details)) ? { subjectKey: inferSubjectKey(kind, text, cleanDetails(kind, input.details)) } : {})),
         version: Math.max(1, Math.floor(Number(input.version) || 1)),
         ...(cleanVersions(input.versions) ? { versions: cleanVersions(input.versions) } : {}),
         ...(optionalIso(input.updatedAt) ? { updatedAt: optionalIso(input.updatedAt) } : {}),

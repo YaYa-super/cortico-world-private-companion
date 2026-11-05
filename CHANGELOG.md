@@ -4,7 +4,7 @@
 
 - 修复「今天」按最近 24h 串前一天：`todayEpisodes/todayDigest` 改为本地自然日 00:00 起；「最近」加日期并标明可能跨天。
 - 「今天」没有 episode 时只报对话条数与时间，不再把私聊原文整条带进提示。
-- 记忆增加 `subjectKey` + 版本历史：同主语的事实/话头/人物更新为当前版本，旧版本保留；新增 `companion_memory_read` 与 `companion_memory_timeline`。
+- 记忆增加 `subjectKey` + 版本历史：同主语的事实/话头/人物更新为当前版本，旧版本保留；thread 自动从正文/`what` 推断主语，fact/person 只认结构化 `details.subject`/`personId`，避免误合并；新增 `companion_memory_read` 与 `companion_memory_timeline`。
 
 ## 0.4.4 — 2026-11-04
 

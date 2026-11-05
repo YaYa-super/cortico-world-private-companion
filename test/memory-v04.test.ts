@@ -100,6 +100,29 @@ test('subjectKey 版本能跨重启保留', () => {
   second.close();
 });
 
+test('自动推断 thread subjectKey：换说法也能归并', () => {
+  const store = fresh();
+  const first = store.add({ kind: 'thread', text: '看视频插件还没做好' });
+  const second = store.add({ kind: 'thread', text: '视频插件一直没做好' });
+  assert.equal(second.id, first.id);
+  const record = store.read(first.id)!;
+  assert.equal(record.version, 2);
+  assert.equal(record.versions?.length, 2);
+});
+
+test('自动推断 fact/person 只认结构化 details', () => {
+  const store = fresh();
+  const f1 = store.add({ kind: 'fact', text: '插件没做好', details: { subject: 'video-plugin' } });
+  const f2 = store.add({ kind: 'fact', text: '插件已装好', details: { subject: 'video-plugin' } });
+  assert.equal(f2.id, f1.id);
+  const plain1 = store.add({ kind: 'fact', text: '今天天气不错' });
+  const plain2 = store.add({ kind: 'fact', text: '今天天气很好' });
+  assert.notEqual(plain2.id, plain1.id);
+  const p1 = store.add({ kind: 'person', text: '爸爸喜欢 B 站', details: { personId: 'dad' } });
+  const p2 = store.add({ kind: 'person', text: '爸爸最近在看 B 站', details: { personId: 'dad' } });
+  assert.equal(p2.id, p1.id);
+});
+
 test('emotionEcho：同 scope、同情绪、至少一天前', () => {
   const store = fresh();
   const past = store.add({
