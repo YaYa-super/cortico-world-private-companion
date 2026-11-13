@@ -18,6 +18,20 @@ export interface PendingTrigger {
   threadId?: string;
 }
 
+/** 最近一次主动决策，面板用它画「为什么开口/没开口」的瀑布。 */
+export interface ProactiveDecisionRecord {
+  at: string;
+  mode: 'gate' | 'shadow' | 'utility';
+  code: string;
+  score: number;
+  benefit: number;
+  cost: number;
+  threshold: number;
+  source: string;
+  reason: string;
+  terms: Array<{ label: string; value: number }>;
+}
+
 export interface AgendaItem {
   /** HH:MM */
   time: string;
@@ -111,6 +125,8 @@ export interface CompanionState {
   lastTalkAt: string | null;
   /** 最近一次主动的理由，给状态页与排障看。 */
   lastProactiveReason: string | null;
+  /** 最近一次主动决策的完整拆解（面板用）。 */
+  lastProactiveDecision?: ProactiveDecisionRecord | null;
 }
 
 interface ActivitySeed {
@@ -265,6 +281,7 @@ export function createInitialState(now: Date, tz: string, cfg: CompanionConfig):
     lastProactiveAt: null,
     lastTalkAt: null,
     lastProactiveReason: null,
+    lastProactiveDecision: null,
   };
 }
 

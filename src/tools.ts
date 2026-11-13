@@ -255,6 +255,415 @@ export const TOOL_SPECS: ToolSpec[] = [
     usage: '查“这件事之前是什么状态”时用；时间线不等于事实，注意版本时间。',
   },
 
+  {
+    name: 'qq_status',
+    description: '查看原生 QQ 通道的连接状态、账号、最近错误和事件数；只读。',
+    parameters: obj({}, []),
+    tags: ['read'],
+    usage: '用户问「QQ 连上了吗」时用；连接/断开由面板负责，不在工具里改。',
+  },
+  {
+    name: 'qq_recent',
+    description: '读取最近收到的 QQ 消息（昵称、私聊/群、文本、图片地址），只读。',
+    parameters: obj({ limit: { type: 'integer', minimum: 1, maximum: 20, description: '返回几条，默认 8' } }, []),
+    tags: ['read'],
+    usage: '用户问「刚才谁找我」「QQ 上说了什么」时用；不要把整段聊天念出来。',
+  },
+  {
+    name: 'qq_send',
+    description: '通过原生 QQ 通道发一条文本消息。target_type=private 用 QQ 号，group 用群号。',
+    parameters: obj(
+      {
+        target_type: { type: 'string', enum: ['private', 'group'], description: '私聊或群聊' },
+        target_id: { type: 'string', description: 'QQ 号或群号' },
+        text: { type: 'string', description: '要发的内容' },
+      },
+      ['target_type', 'target_id', 'text'],
+    ),
+    tags: ['speak'],
+    usage: '只有确实要主动联系/回复时才发；通道未启用或未连接会返回失败。',
+  },
+
+  {
+    name: 'bili_search',
+    description: '在 B 站搜索视频，返回 BV 号、标题、UP 主和时长；只读。',
+    parameters: obj(
+      {
+        keyword: { type: 'string', description: '搜索词' },
+        limit: { type: 'integer', minimum: 1, maximum: 10, description: '返回几条，默认 5' },
+      },
+      ['keyword'],
+    ),
+    tags: ['read'],
+    usage: '用户说「B站上有没有…」时用；只给结果，不自动打开浏览器。',
+  },
+  {
+    name: 'bili_info',
+    description: '读取 B 站视频的标题、UP 主、时长、简介和播放量；只读。',
+    parameters: obj({ bvid: { type: 'string', description: 'BV 号' } }, ['bvid']),
+    tags: ['read'],
+    usage: '用户提到某条 B 站视频时用；不要凭空编造 BV 号。',
+  },
+  {
+    name: 'bili_comments',
+    description: '读取 B 站视频的热评（只读，不回复）。',
+    parameters: obj(
+      {
+        bvid: { type: 'string', description: 'BV 号' },
+        limit: { type: 'integer', minimum: 1, maximum: 20, description: '返回几条，默认 8' },
+      },
+      ['bvid'],
+    ),
+    tags: ['read'],
+    usage: '想知道视频下面大家在说什么时用；不要自动评论。',
+  },
+
+  {
+    name: 'qq_media_list',
+    description: '列出最近下载的 QQ 图片/表情包（sha256 短号、路径、已有含义）。',
+    parameters: obj({ limit: { type: 'integer', minimum: 1, maximum: 30, description: '默认 10' } }, []),
+    tags: ['read'],
+    usage: '想知道她存过哪些图/表情时用；不要逐条念给用户。',
+  },
+  {
+    name: 'qq_media_note',
+    description: '给一张已下载的 QQ 图片/表情包写含义，下次看到同一张图可以直接复用。',
+    parameters: obj(
+      {
+        key: { type: 'string', description: 'sha256、短号或本地路径' },
+        meaning: { type: 'string', description: '这张图/表情的意思，例如「贴贴/撒娇」' },
+      },
+      ['key', 'meaning'],
+    ),
+    tags: ['write'],
+    usage: '看懂了表情包再写；同一张图不要反复改。',
+  },
+
+  {
+    name: 'qq_view_image',
+    description: '查看一条已下载的 QQ 图片/动图。若库里已有含义，不再返回图片，只返回那句含义。',
+    parameters: obj({ key: { type: 'string', description: 'qq_recent 里的图片短号、sha256、路径或 URL' } }, ['key']),
+    tags: ['read'],
+    usage: '只在需要确认画面时用；看完立刻用 qq_media_note 写一句含义，下次不再看。',
+  },
+
+  {
+    name: 'qq_actions',
+    description: '搜索 OneBot action 目录（217 个），返回名称、用途、参数和是否只读；不执行。',
+    parameters: obj(
+      {
+        query: { type: 'string', description: '关键词，例如 群、撤回、文件、管理' },
+        limit: { type: 'integer', minimum: 1, maximum: 30, description: '返回几条，默认 12' },
+      },
+      [],
+    ),
+    tags: ['read'],
+    usage: '调用 qq_call 前先用它确认 action 名和参数。',
+  },
+  {
+    name: 'qq_call',
+    description: '调用 OneBot action。写操作必须 confirm=true；目录里没有或高风险 action 会被拒绝。',
+    parameters: obj(
+      {
+        action: { type: 'string', description: 'qq_actions 里的 action 名' },
+        params: { type: 'object', description: 'action 参数对象' },
+        confirm: { type: 'boolean', description: '写操作必须为 true' },
+      },
+      ['action'],
+    ),
+    tags: ['write'],
+    usage: '只在没有专用工具时用；群管/撤回/文件等写操作要说清楚再调。',
+  },
+  {
+    name: 'qq_receive',
+    description: '查看或修改 QQ 接收策略。值如 private:* / group:123456 / *。',
+    parameters: obj({ receive: { type: 'string', description: '省略=查看；给了就保存' } }, []),
+    tags: ['read', 'write'],
+    usage: '只接收需要的私聊/群时改这里。',
+  },
+  {
+    name: 'onebot_actions',
+    description: '搜索 OneBot action 目录（约 200 个），返回名称、用途、参数和是否只读；不执行。',
+    parameters: obj(
+      {
+        query: { type: 'string', description: '关键词，例如 群、撤回、文件、管理' },
+        limit: { type: 'integer', minimum: 1, maximum: 30, description: '返回几条，默认 12' },
+      },
+      [],
+    ),
+    tags: ['read'],
+    usage: '调用 onebot_call 前先用它确认 action 名和参数；别猜不存在的 action。',
+  },
+  {
+    name: 'onebot_call',
+    description: '调用 OneBot action。写操作必须 confirm=true；目录里没有或高风险 action 会被拒绝。',
+    parameters: obj(
+      {
+        action: { type: 'string', description: 'onebot_actions 里的 action 名' },
+        params: { type: 'object', description: 'action 参数对象' },
+        confirm: { type: 'boolean', description: '写操作必须为 true' },
+      },
+      ['action'],
+    ),
+    tags: ['write'],
+    usage: '只在 onebot_actions 找不到专用工具时用；群管/撤回/文件等写操作要说清楚再调。',
+  },
+  {
+    name: 'onebot_receive',
+    description: '查看或修改 QQ 接收策略。值如 private:* / group:123456 / *，逗号或空格分隔。',
+    parameters: obj({ receive: { type: 'string', description: '省略=查看；给了就保存' } }, []),
+    tags: ['read', 'write'],
+    usage: '只接收需要的私聊/群时改这里；改完立即生效。',
+  },
+
+  {
+    name: 'onebot_status',
+    description: '旧名别名：查看原生 QQ 通道状态（等同 qq_status）。',
+    parameters: obj({}, []),
+    tags: ['read'],
+    usage: '兼容旧提示词。',
+  },
+  {
+    name: 'onebot_events',
+    description: '旧名别名：读取最近 QQ 消息（等同 qq_recent）。',
+    parameters: obj({ limit: { type: 'integer', minimum: 1, maximum: 20, description: '默认 8' } }, []),
+    tags: ['read'],
+    usage: '兼容旧提示词。',
+  },
+  {
+    name: 'onebot_view_image',
+    description: '旧名别名：看 QQ 图片/动图（有含义时不再给图）。',
+    parameters: obj({ key: { type: 'string', description: '图片短号/sha256/路径' } }, ['key']),
+    tags: ['read'],
+    usage: '兼容旧提示词。',
+  },
+  {
+    name: 'onebot_media_note',
+    description: '旧名别名：给 QQ 图片/表情写含义。',
+    parameters: obj({ key: { type: 'string', description: '图片短号/sha256/路径' }, meaning: { type: 'string', description: '含义' } }, ['key', 'meaning']),
+    tags: ['write'],
+    usage: '兼容旧提示词。',
+  },
+  {
+    name: 'onebot_media_list',
+    description: '旧名别名：列出已存的 QQ 图片/表情。',
+    parameters: obj({ limit: { type: 'integer', minimum: 1, maximum: 30, description: '默认 10' } }, []),
+    tags: ['read'],
+    usage: '兼容旧提示词。',
+  },
+
+  {
+    name: 'qq_view_file',
+    description: '查看已下载的 QQ 文件/语音：文本直接读，音频能听就附音频，否则返回本地路径和类型。',
+    parameters: obj({ key: { type: 'string', description: '文件 sha256/短号/路径' } }, ['key']),
+    tags: ['read'],
+    usage: '需要对文件内容下判断时用；大文件只读摘要，不整份塞进上下文。',
+  },
+  {
+    name: 'qq_transcribe_voice',
+    description: '用本机配置的语音转写命令把一条 QQ 语音转成文字；未配置命令会明确报错。',
+    parameters: obj({ key: { type: 'string', description: '语音文件 sha256/短号/路径' } }, ['key']),
+    tags: ['read'],
+    usage: '用户发了语音时用；转写结果只当参考，别把错字当事实。',
+  },
+
+  {
+    name: 'qq_reply',
+    description: '引用一条最近收到的 QQ 消息回复，自动带回原会话（私聊/群）。',
+    parameters: obj(
+      {
+        message_id: { type: 'string', description: 'qq_recent 里的 message_id' },
+        text: { type: 'string', description: '回复内容' },
+      },
+      ['message_id', 'text'],
+    ),
+    tags: ['speak'],
+    usage: '用户引用了某条消息、或需要明确接哪一句时用；普通回复用 qq_send 即可。',
+  },
+
+  {
+    name: 'bili_subtitles',
+    description: '读取 B 站视频字幕（需要登录 Cookie）；返回带时间轴的字幕行。',
+    parameters: obj({ bvid: { type: 'string', description: 'BV 号' } }, ['bvid']),
+    tags: ['read'],
+    usage: '需要理解视频内容时用；字幕可能为空。',
+  },
+  {
+    name: 'bili_history',
+    description: '读取当前 B 站账号的观看记录（需要登录 Cookie）；只读。',
+    parameters: obj({ limit: { type: 'integer', minimum: 1, maximum: 30, description: '默认 20' } }, []),
+    tags: ['read'],
+    usage: '用户问「最近看了什么」时用；不要把整段历史念出来。',
+  },
+
+  {
+    name: 'bili_watch',
+    description: '记一次 B 站观看：读信息/字幕/热评，写观看记录和一条记忆 episode；不评论、不点赞。',
+    parameters: obj(
+      {
+        bvid: { type: 'string', description: 'BV 号' },
+        note: { type: 'string', description: '她看完的感受，可选' },
+        force: { type: 'boolean', description: '明确要求重看时才传 true' },
+      },
+      ['bvid'],
+    ),
+    tags: ['read', 'write'],
+    usage: '用户让她看视频、或她自己刷到一条想记下来的视频时用；重复内容默认硬拦，force 才重看。',
+  },
+
+  {
+    name: 'bili_frames',
+    description: '下载 B 站视频并用 ffmpeg 抽最多 4 帧，给模型看画面；只读，不保留视频。',
+    parameters: obj(
+      {
+        bvid: { type: 'string', description: 'BV 号' },
+        count: { type: 'integer', minimum: 1, maximum: 4, description: '抽几帧，默认 3' },
+      },
+      ['bvid'],
+    ),
+    tags: ['read'],
+    usage: '需要判断画面、封面之外的视频内容时用；抽帧会消耗图片 token。',
+  },
+
+  {
+    name: 'bili_together_open',
+    description: '打开 B站一起看浏览器窗口。给 bvid/url 就进视频，留空进 B站首页；只控制独立 Edge，不碰用户正在用的窗口。',
+    parameters: obj(
+      {
+        bvid: { type: 'string', description: 'BV 号' },
+        url: { type: 'string', description: '完整 B站视频 URL（与 bvid 二选一）' },
+      },
+      [],
+    ),
+    tags: ['write'],
+    usage: '用户说「一起看」时用；打开后需要播放再调 control。',
+  },
+  {
+    name: 'bili_together_control',
+    description: '一起看播放控制：play / pause / seek / status。',
+    parameters: obj(
+      {
+        action: { type: 'string', enum: ['play', 'pause', 'seek', 'status'], description: '控制动作' },
+        seconds: { type: 'number', description: 'seek 的目标秒数' },
+      },
+      ['action'],
+    ),
+    tags: ['write'],
+    usage: '一起看时用；播放会写观看账本。',
+  },
+  {
+    name: 'bili_together_frame',
+    description: '截取一起看浏览器当前画面，作为观察帧。',
+    parameters: obj({}, []),
+    tags: ['read'],
+    usage: '用户问「现在画面是什么」或需要一起看当前帧时用。',
+  },
+  {
+    name: 'bili_together_close',
+    description: '关闭一起看浏览器窗口。',
+    parameters: obj({}, []),
+    tags: ['write'],
+    usage: '看完后关掉，释放 Edge 进程。',
+  },
+
+  {
+    name: 'companion_screen',
+    description: '截取当前桌面屏幕，给模型看用户正在做什么；需要 worlds.companion.screenEnabled。',
+    parameters: obj({}, []),
+    tags: ['read'],
+    usage: '只在用户明确让你看屏幕/桌面时用；不要频繁截屏。',
+  },
+
+  {
+    name: 'bili_comment_reply',
+    description: '在 B站视频下发评论或回复某条评论；会自动 @ 主人账号。需要 biliReplyEnabled + confirm。',
+    parameters: obj(
+      {
+        bvid: { type: 'string', description: 'BV 号' },
+        text: { type: 'string', description: '评论内容' },
+        image: { type: 'string', description: '本地图片路径（可选，评论带图）' },
+        mention_owner: { type: 'boolean', description: '是否在评论里 @ 主人；由你判断，默认否' },
+        root: { type: 'integer', description: '被回复的根评论 rpid（可选）' },
+        parent: { type: 'integer', description: '父评论 rpid（可选，默认 root）' },
+        confirm: { type: 'boolean', description: '必须为 true' },
+      },
+      ['bvid', 'text', 'confirm'],
+    ),
+    tags: ['write'],
+    usage: '明确要评论/回复时才用；是否 @ 主人你自己判断，受每天评论上限限制。',
+  },
+  {
+    name: 'bili_dm_reply',
+    description: '回复一条 B站私信；需要 biliReplyEnabled + confirm。talker_id 在私信推送里。',
+    parameters: obj(
+      {
+        talker_id: { type: 'integer', description: '私信会话 talker_id' },
+        text: { type: 'string', description: '回复内容' },
+        confirm: { type: 'boolean', description: '必须为 true' },
+      },
+      ['talker_id', 'text', 'confirm'],
+    ),
+    tags: ['write'],
+    usage: '收到私信后明确要回才用；不要自动回复陌生人。',
+  },
+
+  {
+    name: 'bili_together_share',
+    description: '把一起看当前画面截图，作为评论发到正在看的视频并 @ 主人。',
+    parameters: obj({ text: { type: 'string', description: '配文，默认「这一帧给你看。」' } }, []),
+    tags: ['write'],
+    usage: '一起看时想主动分享当前画面才用；mention_owner 由你判断。',
+  },
+
+  {
+    name: 'bili_act',
+    description: '以她自己的 B站账号执行动作：like/unlike、coin、favorite/unfavorite、follow/unfollow、share、watch_later、danmaku、comment_like/unlike、comment_delete、dm_owner。',
+    parameters: obj(
+      {
+        action: { type: 'string', enum: ['like', 'unlike', 'coin', 'favorite', 'unfavorite', 'follow', 'unfollow', 'share', 'watch_later', 'danmaku', 'comment_like', 'comment_unlike', 'comment_delete', 'dm_owner'], description: '动作' },
+        bvid: { type: 'string', description: 'BV 号（dm_owner 可选）' },
+        text: { type: 'string', description: '弹幕/私信内容' },
+        count: { type: 'integer', minimum: 1, maximum: 2, description: '投币数' },
+        seconds: { type: 'number', description: '弹幕时间点（秒）' },
+        rpid: { type: 'integer', description: '评论 rpid' },
+      },
+      ['action'],
+    ),
+    tags: ['write'],
+    usage: '看完一条视频后自己决定要不要点赞/投币/收藏/关注/分享/发弹幕；不要默认全做。评论/私信是否 @ 主人或私信主人也由你判断。',
+  },
+
+  {
+    name: 'bili_profile',
+    description: '读取当前 B站账号资料：昵称、签名、头像 URL、性别/生日。只读。',
+    parameters: obj({}, []),
+    tags: ['read'],
+    usage: '需要确认账号当前资料时用；不要把生日等隐私随意复述。',
+  },
+  {
+    name: 'bili_update_profile',
+    description: '修改当前 B站账号的签名和/或头像；昵称暂不改（会扣币）。需要 biliInteractEnabled + confirm。',
+    parameters: obj(
+      {
+        signature: { type: 'string', description: '新签名，最多 70 字' },
+        avatar: { type: 'string', description: '本地 png/jpg 头像路径' },
+        confirm: { type: 'boolean', description: '必须为 true' },
+      },
+      ['confirm'],
+    ),
+    tags: ['write'],
+    usage: '只有本人明确要改资料时才用；改完签名可能进审核。',
+  },
+
+
+  {
+    name: 'bili_together_auto',
+    description: '一起看自己找视频：给关键词就搜第一条，不给就从观看记录/热门里挑一条；打开并播放。',
+    parameters: obj({ query: { type: 'string', description: '想看什么；留空随便挑' } }, []),
+    tags: ['write'],
+    usage: '用户说“一起看点什么都行/你挑一个”时用，不需要用户提供 BV。',
+  },
+
 ];
 
 /** 给人看的一句话（设置页与市场）。 */
@@ -271,4 +680,27 @@ export const TOOL_SUMMARIES: Record<string, string> = {
   companion_memory_read: '按 id 读完整记忆与版本历史。',
   companion_memory_timeline: '按 subjectKey 看同一件事的时间线。',
   companion_consolidate: '夜间整理：取材料或提交 0-6 条结构化记忆。',
+  qq_status: '查看原生 QQ 通道状态。',
+  qq_recent: '读取最近 QQ 消息。',
+  qq_send: '通过原生 QQ 通道发文本。',
+  bili_search: '搜索 B 站视频（只读）。',
+  bili_info: '读取 B 站视频信息（只读）。',
+  bili_comments: '读取 B 站热评（只读）。',
+  qq_media_list: '列出已下载的 QQ 图片/表情。',
+  qq_media_note: '给 QQ 图片/表情写含义。',
+  qq_view_image: '看 QQ 图片/动图（有含义时不再给图）。',
+  qq_actions: '搜索 OneBot action 目录。',
+  qq_call: '调用 OneBot action（写操作需确认）。',
+  qq_receive: '查看/修改 QQ 接收策略。',
+  onebot_actions: '旧名：搜索 OneBot action 目录。',
+  onebot_call: '旧名：调用 OneBot action。',
+  onebot_receive: '旧名：QQ 接收策略。',
+  onebot_status: '旧名：QQ 通道状态。',
+  onebot_events: '旧名：最近 QQ 消息。',
+  onebot_view_image: '旧名：看 QQ 图片/动图。',
+  onebot_media_note: '旧名：写图片含义。',
+  onebot_media_list: '旧名：列出图片。',
+  qq_view_file: '查看 QQ 文件/语音。',
+  qq_transcribe_voice: '转写 QQ 语音（需本机命令）。',
+  qq_reply: '引用回复 QQ 消息。',
 };

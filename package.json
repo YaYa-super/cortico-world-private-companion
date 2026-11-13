@@ -1,6 +1,6 @@
 {
   "name": "cortico-world-private-companion",
-  "version": "0.4.5",
+  "version": "0.8.0",
   "type": "module",
   "description": "「我会永远陪着你」Coopanion 版：把 menglimi 的 AstrBot 插件 astrbot_plugin_private_companion 的生活感、主动联系、关系卡与说话分寸，独立实现为 Coopanion 的 World 扩展；内置可迁移记忆（companion-memory/2，导入导出 + 隔离审核）。",
   "keywords": [
@@ -45,13 +45,15 @@
     "ENV_PROMPT.md",
     "README.md",
     "LICENSE",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "THIRD_PARTY_NOTICES.md"
   ],
   "scripts": {
     "test": "node --test",
     "describe": "node tools/gen-describe.mjs",
+    "build:webui": "node tools/build-webui.mjs",
     "smoke": "node tools/smoke.ts",
-    "prepublishOnly": "node tools/gen-describe.mjs && node --test"
+    "prepublishOnly": "node tools/gen-describe.mjs && node tools/build-webui.mjs && node --test"
   },
   "publishConfig": {
     "access": "public"
@@ -62,5 +64,10 @@
   },
   "bugs": {
     "url": "https://github.com/YaYa-super/cortico-world-private-companion/issues"
+  },
+  "dependencies": {
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "puppeteer-core": "^25.12.0",
+    "ws": "^8.18.0"
   }
 }

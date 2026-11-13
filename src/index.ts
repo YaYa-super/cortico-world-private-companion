@@ -8,4 +8,4 @@ export const create = COMPANION_WORLD.create;
 
 export { COMPANION_WORLD } from './definition.ts';
 export default COMPANION_WORLD;
-export { companionDefaults, COMPANION_DEFAULTS, COMPANION_CONFIG_GROUP, type CompanionConfig } from './config.ts';
+export { companionDefaults, COMPANION_DEFAULTS, COMPANION_CONFIG_GROUP, COMPANION_CONFIG_GROUPS, type CompanionConfig } from './config.ts';

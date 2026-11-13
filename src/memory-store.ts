@@ -982,7 +982,7 @@ export class MemoryStore {
   } = {}): MemoryHit[] {
     const raw = normalize(query);
     if (!raw) return [];
-    const limit = Math.max(1, Math.min(20, opts.limit ?? 6));
+    const limit = Math.max(1, Math.min(50, opts.limit ?? 6));
     const qTokens = [...new Set(tokenize(raw))];
     const lowerRaw = raw.toLowerCase();
     const days = Math.max(1, opts.retentionDays ?? 45);

@@ -45,6 +45,55 @@ const EVENTS: EventDescribe[] = [
     },
     trigger: 'flush',
   },
+
+  {
+    type: 'qq.message',
+    description: {
+      zh: 'QQ 私聊或群聊入站消息；私聊/被@直接唤醒，普通群聊进 utility。',
+      en: 'Incoming QQ message; direct chats/mentions wake immediately.',
+    },
+    trigger: 'flush',
+  },
+  {
+    type: 'bili.inbox',
+    description: {
+      zh: 'B站 @我的/回复我的通知，后台轮询后直接推给模型。',
+      en: 'Bilibili @/reply notifications pushed after background polling.',
+    },
+    trigger: 'debounce',
+  },
+  {
+    type: 'bili.dm',
+    description: {
+      zh: 'B站私信（含分享视频卡片），后台轮询后直接推给模型。',
+      en: 'Bilibili direct messages including shared-video cards.',
+    },
+    trigger: 'debounce',
+  },
+  {
+    type: 'bili.together.frame',
+    description: {
+      zh: '一起看自动观察帧：播放中按配置的观察间隔（默认 5 秒）推送最近画面的图集，带标题和进度。',
+      en: 'Automatic together-watch frame: a screenshot with title and playback position, pushed while playing.',
+    },
+    trigger: 'debounce',
+  },
+  {
+    type: 'bili.watch',
+    description: {
+      zh: 'B站自己看/一起看留下的观看事件，可成为主动分享的由头。',
+      en: 'A Bilibili watch event that can seed a proactive share.',
+    },
+    trigger: 'debounce',
+  },
+  {
+    type: 'companion.media',
+    description: {
+      zh: '图片补记提醒：之前随 QQ 看过但还没写含义的图片，隔一段时间再给一次画面，让角色补记。',
+      en: 'A reminder with previously seen QQ images that still lack a meaning, so the character can caption them.',
+    },
+    trigger: 'debounce',
+  },
   {
     type: 'companion.muse',
     description: {

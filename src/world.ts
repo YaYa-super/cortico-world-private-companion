@@ -5,14 +5,16 @@
  * 与 AstrBot 原插件的差别（详见 README）：这里不接管对话、不碰平台、不做 TTS/生图/识屏，
  * 只管“它自己的生活在动”和“什么时候它想开口”。人格仍由 CONSTITUTION.md 提供。
  */
-import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import type {
   OutputTap, ToolDef, ToolOutcome, World, WorldHost, WorldWebUiDecl,
 } from 'cortico/core/types.ts';
 import type { WorldContext } from 'cortico/world.ts';
-import { COMPANION_CONFIG_GROUP, type CompanionConfig } from './config.ts';
+import { COMPANION_CONFIG_GROUPS, type CompanionConfig } from './config.ts';
 import {
   advance, agendaLine, createInitialState, currentItem, generateAgenda, isSleeping, moodLabel,
   upcomingItem, type AgendaItem, type CompanionState, type PendingTrigger,
@@ -23,9 +25,19 @@ import { evaluate, reasonFor } from './proactive.ts';
 import { SnapshotPusher } from './snapshot.ts';
 import { detectEmotion, relatedWords } from './emotion.ts';
 import { isDuplicateSent, makeIntention, pickActionable, scoreThought, thinkAll, type Intention, type Thought } from './cognition.ts';
+import { computeUtility } from './utility.ts';
+import { deriveUserModel, renderUserModel } from './user-model.ts';
 import { MindLog, type MindType } from './mind.ts';
 import { MEMORY_KINDS, MemoryStore, scopeKey, type MemoryKind, type MemoryRecord } from './memory-store.ts';
 import { isHumanEvent, scopeOfEvent } from './event-filter.ts';
+import { OneBotChannel } from './channels/onebot.ts';
+import { BILI_READONLY_DESIGN } from './channels/bili-read.ts';
+import { BiliReadClient } from './channels/bili.ts';
+import { BiliWatchLedger } from './channels/bili-watch.ts';
+import { TogetherBrowser } from './channels/together.ts';
+import { DeepSeekVoice } from './channels/deepseek-voice.ts';
+import { cropSprite, gifFrames, montageImages } from './channels/image-view.ts';
+import { BLOCKED_ACTIONS, findOneBotAction, searchOneBotActions, validateActionParams } from './channels/onebot-catalog.ts';
 import { fetchWeather, weatherTrigger } from './weather.ts';
 import { fetchHolidays, fixedHolidays } from './holidays.ts';
 import { searchGitmem, workspaceFor } from './gitmem.ts';
@@ -44,6 +56,29 @@ const NL = String.fromCharCode(10);
 const SAVE_EVERY_MS = 20_000;
 const STATE_FILE = 'state.json';
 const PROFILES_FILE = 'profiles.json';
+
+/** 从 onebot_call 的参数里取出“真的发出去的文本”（send_private_msg / send_group_msg / send_msg）。 */
+function onebotSendText(args: Record<string, unknown>): string {
+  const action = String(args.action ?? '');
+  if (!['send_private_msg', 'send_group_msg', 'send_msg'].includes(action)) return '';
+  const params = args.params && typeof args.params === 'object'
+    ? args.params as Record<string, unknown>
+    : {};
+  const message = params.message ?? args.message;
+  if (typeof message === 'string') return message.trim();
+  if (!Array.isArray(message)) return '';
+  const parts: string[] = [];
+  for (const segment of message) {
+    if (!segment || typeof segment !== 'object') continue;
+    const seg = segment as Record<string, unknown>;
+    if (seg.type !== 'text') continue;
+    const data = seg.data && typeof seg.data === 'object'
+      ? seg.data as Record<string, unknown>
+      : {};
+    if (typeof data.text === 'string' && data.text.trim()) parts.push(data.text.trim());
+  }
+  return parts.join(' ');
+}
 
 function clampNumber(n: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, n));
@@ -71,6 +106,25 @@ export class CompanionWorld implements World {
   private dataDir: string;
   private readonly memoryStore: MemoryStore;
   private readonly mindLog: MindLog;
+  private readonly oneBot: OneBotChannel;
+  private readonly bili: BiliReadClient;
+  private readonly biliWatch: BiliWatchLedger;
+  private readonly together: TogetherBrowser;
+  private readonly voice: DeepSeekVoice;
+  private readonly biliOwnerUid: string;
+  private togetherBvid = '';
+  private lastTogetherFrame = '';
+  private togetherObserveTimer: ReturnType<typeof setInterval> | null = null;
+  private togetherObserveInFlight = false;
+  private qqChannelRunning = false;
+  private lastTogetherObserveAt = 0;
+  private togetherSamples: string[] = [];
+  private lastTogetherPreviewBvid = '';
+  private lastTogetherPreviewAt = 0;
+  private togetherAutoBusy = false;
+  private biliSelfWatchInFlight = false;
+  private biliNoticeInFlight = false;
+  private lastMediaReminderAt = 0;
   private lastMindGate = '';
   private timer: ReturnType<typeof setInterval> | null = null;
   private snapshot: SnapshotPusher | null = null;
@@ -91,11 +145,49 @@ export class CompanionWorld implements World {
   private wakeTools: Array<{ id: string; name: string; args: string }> = [];
   private wakeReason = '';
   private pendingReviewIds: string[] = [];
+  /** 用户模型渲染缓存：10 分钟或记录数变化时重算。 */
+  private userModelCache: { at: number; records: number; text: string } | null = null;
 
   constructor(ctx: WorldContext<CompanionConfig>) {
     this.ctx = ctx;
     const base = typeof ctx.dataDir === 'string' && ctx.dataDir ? ctx.dataDir : '.';
     this.dataDir = join(base, 'private-companion');
+    this.oneBot = new OneBotChannel({ dataDir: this.dataDir, botDir: ctx.botDir });
+    const biliCookie = this.cfg().biliCookieFile || join(ctx.botDir, 'data', 'bili-video-pro', 'cookies.json');
+    this.bili = new BiliReadClient({ cookieFile: biliCookie });
+    this.biliWatch = new BiliWatchLedger(join(this.dataDir, 'bili', 'watch-ledger.jsonl'));
+    try {
+      const oldState = join(ctx.botDir, 'data', 'bili-video-pro', 'selfwatch.json');
+      if (existsSync(oldState)) {
+        const parsed = JSON.parse(readFileSync(oldState, 'utf8')) as Record<string, unknown>;
+        const watched = Array.isArray(parsed.watched) ? parsed.watched.map(String) : [];
+        const fingerprints = parsed.fingerprints && typeof parsed.fingerprints === 'object'
+          ? Object.values(parsed.fingerprints as Record<string, unknown>).map(String) : [];
+        this.biliWatch.importLegacy(watched, fingerprints);
+      }
+    } catch { /* 旧状态坏了不影响新账本 */ }
+    this.together = new TogetherBrowser({ dataDir: this.dataDir, edgePath: this.cfg().biliBrowserPath || '' });
+    this.voice = new DeepSeekVoice({
+      botDir: ctx.botDir,
+      baseUrl: this.cfg().deepseekBaseUrl || 'https://api.deepseek.com',
+      keyFile: this.cfg().deepseekKeyFile || undefined,
+    });
+    let ownerUid = String(this.cfg().biliOwnerUid || '').trim();
+    if (!ownerUid) {
+      try {
+        const configPath = join(ctx.botDir, 'config.json');
+        if (existsSync(configPath)) {
+          const config = JSON.parse(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
+          const worlds = config.worlds && typeof config.worlds === 'object' ? config.worlds as Record<string, unknown> : {};
+          const bili = worlds['bili-video-pro'] && typeof worlds['bili-video-pro'] === 'object' ? worlds['bili-video-pro'] as Record<string, unknown> : {};
+          const owner = bili.owner && typeof bili.owner === 'object' ? bili.owner as Record<string, unknown> : {};
+          ownerUid = String(owner.uid || '').trim();
+        }
+      } catch { /* ignore */ }
+    }
+    this.biliOwnerUid = ownerUid;
+    this.oneBot.onMessage = (message) => this.handleQqMessage(message);
+    this.oneBot.loadConfig();
     this.memoryStore = new MemoryStore(join(this.dataDir, 'memory'), undefined, { lock: true });
     this.mindLog = new MindLog(join(this.dataDir, 'mind.jsonl'), 500);
     this.state = createInitialState(new Date(), this.tz(), this.cfg());
@@ -103,7 +195,8 @@ export class CompanionWorld implements World {
   }
 
   private cfg(): CompanionConfig {
-    return this.ctx.cfg;
+    // 旧版 onebot_* 别名已从正式 UI 移除；强制关闭，避免和旧 OneBot 扩展撞名。
+    return { ...this.ctx.cfg, qqLegacyTools: false };
   }
 
   private tz(): string {
@@ -156,7 +249,14 @@ export class CompanionWorld implements World {
   }
 
   tools(): ToolDef[] {
-    return TOOL_SPECS.map((spec) => ({
+    const specs = TOOL_SPECS.filter((spec) => {
+      if (spec.name.startsWith('onebot_') && !this.cfg().qqLegacyTools) return false;
+      if ((spec.name.startsWith('qq_') || spec.name.startsWith('onebot_')) && !this.cfg().qqChannelEnabled) return false;
+      if (spec.name.startsWith('bili_') && !this.cfg().biliChannelEnabled) return false;
+      if (spec.name === 'companion_screen' && !this.cfg().screenEnabled) return false;
+      return true;
+    });
+    return specs.map((spec) => ({
       name: spec.name,
       description: spec.description,
       parameters: spec.parameters,
@@ -174,8 +274,10 @@ export class CompanionWorld implements World {
     }));
   }
 
-  private dispatch(name: string, args: Record<string, unknown>): Promise<string> {
+  private dispatch(name: string, args: Record<string, unknown>): Promise<string | ToolOutcome> {
     switch (name) {
+      case 'companion_screen':
+        return this.toolCompanionScreen();
       case 'companion_state':
         return this.toolState(args);
       case 'companion_agenda':
@@ -200,6 +302,78 @@ export class CompanionWorld implements World {
         return this.toolMemoryRead(args);
       case 'companion_memory_timeline':
         return this.toolMemoryTimeline(args);
+      case 'qq_status':
+        return this.toolQqStatus();
+      case 'qq_recent':
+        return this.toolQqRecent(args);
+      case 'qq_send':
+        return this.toolQqSend(args);
+      case 'qq_media_list':
+        return this.toolQqMediaList(args);
+      case 'qq_media_note':
+        return this.toolQqMediaNote(args);
+      case 'qq_reply':
+        return this.toolQqReply(args);
+      case 'qq_view_file':
+        return this.toolQqViewFile(args);
+      case 'qq_transcribe_voice':
+        return this.toolQqTranscribeVoice(args);
+      case 'qq_view_image':
+      case 'onebot_view_image':
+        return this.toolQqViewImage(args);
+      case 'qq_actions':
+      case 'onebot_actions':
+        return this.toolOneBotActions(args);
+      case 'qq_call':
+      case 'onebot_call':
+        return this.toolOneBotCall(args);
+      case 'qq_receive':
+      case 'onebot_receive':
+        return this.toolOneBotReceive(args);
+      case 'onebot_status':
+        return this.toolQqStatus();
+      case 'onebot_events':
+        return this.toolQqRecent(args);
+      case 'onebot_media_note':
+        return this.toolQqMediaNote(args);
+      case 'onebot_media_list':
+        return this.toolQqMediaList(args);
+      case 'bili_search':
+        return this.toolBiliSearch(args);
+      case 'bili_info':
+        return this.toolBiliInfo(args);
+      case 'bili_comments':
+        return this.toolBiliComments(args);
+      case 'bili_subtitles':
+        return this.toolBiliSubtitles(args);
+      case 'bili_history':
+        return this.toolBiliHistory(args);
+      case 'bili_watch':
+        return this.toolBiliWatch(args);
+      case 'bili_frames':
+        return this.toolBiliFrames(args);
+      case 'bili_together_open':
+        return this.toolBiliTogetherOpen(args);
+      case 'bili_together_auto':
+        return this.toolBiliTogetherAuto(args);
+      case 'bili_together_control':
+        return this.toolBiliTogetherControl(args);
+      case 'bili_together_frame':
+        return this.toolBiliTogetherFrame();
+      case 'bili_together_close':
+        return this.toolBiliTogetherClose();
+      case 'bili_comment_reply':
+        return this.toolBiliCommentReply(args);
+      case 'bili_dm_reply':
+        return this.toolBiliDmReply(args);
+      case 'bili_act':
+        return this.toolBiliAct(args);
+      case 'bili_profile':
+        return this.toolBiliProfile();
+      case 'bili_update_profile':
+        return this.toolBiliUpdateProfile(args);
+      case 'bili_together_share':
+        return this.toolBiliTogetherShare(args);
       default:
         return Promise.resolve(`未知工具 ${name}`);
     }
@@ -235,6 +409,19 @@ export class CompanionWorld implements World {
             ? `记录 ${this.memoryStore.stats().records} · 事件 ${this.memoryStore.stats().events}`
             : '已关闭',
         },
+        ...(cfg.qqChannelEnabled ? [{
+          label: 'QQ',
+          state: this.oneBot.status().state === 'online' ? 'online'
+            : this.oneBot.status().enabled ? 'loading' : 'offline',
+          hint: this.oneBot.status().state === 'online'
+            ? (this.oneBot.status().selfId ? `已连接 · ${this.oneBot.status().selfId}` : '已连接')
+            : this.oneBot.status().enabled ? '连接中 / 等待重连' : '未启用',
+        }] : []),
+        ...(cfg.biliChannelEnabled ? [{
+          label: 'B站',
+          state: 'offline',
+          hint: '只读层设计中',
+        }] : []),
       ],
       badges: [
         { label: '精力', value: Math.round(state.energy), tone: state.energy < 35 ? 'off' : 'on' },
@@ -254,15 +441,35 @@ export class CompanionWorld implements World {
           ],
         },
       ],
-      config: [COMPANION_CONFIG_GROUP],
+      config: COMPANION_CONFIG_GROUPS,
       panels: [
         {
-          id: 'memory',
+          id: 'life',
           title: '记忆',
-          description: '只读查看：概览、检索、合并摘要；可以撤销合并。导入审核仍走 CLI。',
+          description: '记忆的可视化观察窗：此刻、星图、概览/最近、全库搜索、合并摘要、关系。只读。',
         },
+        ...(cfg.qqChannelEnabled ? [{
+          id: 'qq',
+          title: 'QQ',
+          description: '原生 OneBot 通道：连接状态、地址与事件计数；消息入记忆和工具在后续接入。',
+        }] : []),
+        ...(cfg.biliChannelEnabled ? [{
+          id: 'bili',
+          title: 'B站',
+          description: 'B 站只读层设计：搜索、视频信息、字幕、弹幕、热评、观看记录；暂不发起请求。',
+        }] : []),
       ],
-      invoke: (panel, method, args) => this.invokeMemoryPanel(panel, method, args),
+      invoke: (panel, method, args) => {
+        if (panel === 'qq') {
+          if (!this.cfg().qqChannelEnabled) throw new Error('QQ 通道未启用');
+          return this.invokeQqPanel(method, args);
+        }
+        if (panel === 'bili') {
+          if (!this.cfg().biliChannelEnabled) throw new Error('B站通道未启用');
+          return this.invokeBiliPanel(method, args);
+        }
+        return this.invokeMemoryPanel(panel, method, args);
+      },
       storage: [
         {
           key: 'companion-state',
@@ -295,8 +502,177 @@ export class CompanionWorld implements World {
   }
 
   /** 记忆面板的服务端方法：只读为主，唯一写操作是撤销合并。 */
+  private qqSnapshot(): Record<string, unknown> {
+    const config = this.oneBot.loadConfig();
+    return {
+      status: this.oneBot.status(),
+      recent: this.oneBot.recent(12),
+      eventHistory: this.oneBot.recent(100),
+      messages: this.oneBot.recentMessages(8),
+      config: { enabled: config.enabled, wsUrl: config.wsUrl, receive: config.receive, sttCommand: config.sttCommand },
+      configPath: this.oneBot.configPath,
+    };
+  }
+
+  private async invokeQqPanel(method: string, args: unknown[]): Promise<unknown> {
+    const list = Array.isArray(args) ? args : [];
+    if (method === 'status') return this.qqSnapshot();
+    if (method === 'recent') return { recent: this.oneBot.recent(Number(list[0]) || 12) };
+    if (method === 'save') {
+      const patch = list[0] && typeof list[0] === 'object' ? list[0] as Record<string, unknown> : {};
+      const next: { enabled?: boolean; wsUrl?: string; token?: string; receive?: string; sttCommand?: string } = {};
+      if (typeof patch.enabled === 'boolean') next.enabled = patch.enabled;
+      if (typeof patch.wsUrl === 'string') next.wsUrl = patch.wsUrl;
+      if (typeof patch.receive === 'string') next.receive = patch.receive;
+      if (typeof patch.sttCommand === 'string') next.sttCommand = patch.sttCommand;
+      if (typeof patch.token === 'string' && patch.token) next.token = patch.token;
+      const saved = this.oneBot.saveConfig(next);
+      if (saved.enabled) {
+        await this.oneBot.restart();
+        await this.oneBot.waitReady();
+      } else {
+        await this.oneBot.stop();
+      }
+      return this.qqSnapshot();
+    }
+    if (method === 'connect') {
+      this.oneBot.saveConfig({ enabled: true });
+      await this.oneBot.restart();
+      await this.oneBot.waitReady();
+      return this.qqSnapshot();
+    }
+    if (method === 'disconnect') {
+      this.oneBot.saveConfig({ enabled: false });
+      await this.oneBot.stop();
+      return this.qqSnapshot();
+    }
+    if (method === 'group') {
+      const patch = list[0] && typeof list[0] === 'object' ? list[0] as Record<string, unknown> : {};
+      const action = trimText(patch.action, 80);
+      if (!/^(set_group_|get_group_)/.test(action)) throw new Error('只允许群管 action');
+      const params = patch.params && typeof patch.params === 'object' && !Array.isArray(patch.params)
+        ? { ...(patch.params as Record<string, unknown>) } : {};
+      if (patch.group_id !== undefined) {
+        const groupId = String(patch.group_id).trim();
+        params.group_id = /^\d+$/.test(groupId) ? Number(groupId) : groupId;
+      }
+      for (const key of ['group_id', 'user_id', 'duration']) {
+        if (typeof params[key] === 'string' && /^\d+$/.test(String(params[key]).trim())) params[key] = Number(params[key]);
+      }
+      const result = await this.toolOneBotCall({ action, params, confirm: true });
+      return { ...this.qqSnapshot(), result };
+    }
+    throw new Error(`未知 QQ 面板方法：${method}`);
+  }
+
+  private async invokeBiliPanel(method: string, args: unknown[]): Promise<unknown> {
+    const list = Array.isArray(args) ? args : [];
+    if (!this.cfg().biliChannelEnabled) throw new Error('B站通道未启用');
+    if (method === 'status' || method === 'refresh' || method === 'design') {
+      let nav = { loggedIn: false, name: '', mid: '' };
+      try { nav = await this.bili.nav(); } catch { /* 未登录/风控时保留匿名状态 */ }
+      return { design: BILI_READONLY_DESIGN, total: BILI_READONLY_DESIGN.capabilities.length, nav };
+    }
+    if (method === 'history') {
+      return { history: await this.bili.history(Number(list[0]) || 20) };
+    }
+    if (method === 'subtitles') {
+      return { subtitles: await this.bili.subtitles(trimText(list[0], 30)) };
+    }
+    if (method === 'search') {
+      const query = trimText(list[0], 100);
+      if (!query) return { query, hits: [] };
+      return { query, hits: await this.bili.search(query, 8) };
+    }
+    if (method === 'info') {
+      return { info: await this.bili.info(trimText(list[0], 30)) };
+    }
+    if (method === 'comments') {
+      return { comments: await this.bili.comments(trimText(list[0], 30), Number(list[1]) || 8) };
+    }
+    if (method === 'danmaku') {
+      return { danmaku: await this.bili.danmaku(trimText(list[0], 30), Number(list[1]) || 80) };
+    }
+    if (method === 'profile') {
+      const [account, nav] = await Promise.all([
+        this.bili.memberAccount().catch(() => null),
+        this.bili.nav().catch(() => null),
+      ]);
+      return { profile: { ...(account || {}), face: account?.face || nav?.face || '' } };
+    }
+    if (method === 'update_profile') {
+      const patch = list[0] && typeof list[0] === 'object' ? list[0] as Record<string, unknown> : {};
+      const result = await this.toolBiliUpdateProfile({ ...patch, confirm: true });
+      return { result };
+    }
+    if (method === 'notices') {
+      const [inbox, dms] = await Promise.all([
+        this.bili.inbox(12).catch(() => []),
+        this.bili.dmSessions(10).then((sessions) => sessions.filter((session) => session.talkerId !== 844424930131964)).catch(() => []),
+      ]);
+      return { inbox, dms };
+    }
+    if (method === 'reply_comment') {
+      const patch = list[0] && typeof list[0] === 'object' ? list[0] as Record<string, unknown> : {};
+      const result = await this.toolBiliCommentReply({
+        bvid: patch.bvid, text: patch.text, root: patch.root, parent: patch.parent,
+        image: patch.image, mention_owner: patch.mention_owner === true, confirm: true,
+      });
+      return { result };
+    }
+    if (method === 'reply_dm') {
+      const patch = list[0] && typeof list[0] === 'object' ? list[0] as Record<string, unknown> : {};
+      const result = await this.toolBiliDmReply({ talker_id: patch.talker_id, text: patch.text, confirm: true });
+      return { result };
+    }
+    if (method === 'share_frame') {
+      const patch = list[0] && typeof list[0] === 'object' ? list[0] as Record<string, unknown> : { text: list[0] };
+      const text = trimText(patch.text, 300) || '这一帧给你看。';
+      if (!this.togetherBvid) return { result: '还没有一起看的视频' };
+      if (!this.lastTogetherFrame) await this.togetherFrame();
+      const result = await this.toolBiliCommentReply({
+        bvid: this.togetherBvid, text, image: this.lastTogetherFrame,
+        mention_owner: patch.mention_owner === true, confirm: true,
+      });
+      return { result };
+    }
+    if (method === 'selfwatch') {
+      const patch = list[0] && typeof list[0] === 'object' ? list[0] as Record<string, unknown> : null;
+      if (patch) {
+        const file = join(this.dataDir, 'bili', 'selfwatch-config.json');
+        mkdirSync(join(this.dataDir, 'bili'), { recursive: true });
+        writeFileSync(file, JSON.stringify({
+          enabled: patch.enabled === true,
+          everyMinutes: Math.max(30, Math.min(1440, Number(patch.everyMinutes) || 180)),
+          topics: trimText(patch.topics, 200),
+        }), 'utf8');
+      }
+      return { selfwatch: this.biliSelfWatchConfig() };
+    }
+    if (method === 'together_open') {
+      const input = trimText(list[0], 300);
+      return { together: await this.togetherOpen(input) };
+    }
+    if (method === 'together_auto') {
+      return { together: await this.togetherAuto(trimText(list[0], 100)) };
+    }
+    if (method === 'together_control') {
+      return { together: await this.togetherControl(trimText(list[0], 20), Number(list[1]) || 0) };
+    }
+    if (method === 'together_frame') {
+      const frame = await this.togetherFrame();
+      return { together: frame.status, path: frame.path };
+    }
+    if (method === 'together_close') {
+      this.stopTogetherObserver();
+      await this.together.close();
+      return { together: await this.together.status() };
+    }
+    throw new Error(`未知 B站面板方法：${method}`);
+  }
+
   private async invokeMemoryPanel(panel: string, method: string, args: unknown[]): Promise<unknown> {
-    if (panel !== 'memory') throw new Error(`未知面板：${panel}`);
+    if (panel !== 'memory' && panel !== 'life') throw new Error(`未知面板：${panel}`);
     const list = Array.isArray(args) ? args : [];
     const store = this.memoryStore;
     if (method === 'overview') {
@@ -339,11 +715,167 @@ export class CompanionWorld implements World {
         mindLogLevel: this.cfg().mindLogLevel ?? 'summary',
       };
     }
+    if (method === 'rename') {
+      const raw = typeof list[0] === 'string' ? list[0].replace(/\s+/g, ' ').trim().slice(0, 20) : '';
+      const name = raw || '大肥鱼';
+      this.ctx.persist({ displayName: name });
+      this.save(true);
+      return { name };
+    }
+    if (method === 'dashboard') {
+      const now = new Date();
+      const p = localParts(now, this.tz());
+      const dayStart = startOfLocalDayMs(now, this.tz());
+      const stats = store.stats();
+      const records = store.entries();
+      const person = store.people()[0];
+      const profile = this.currentProfile();
+      const journal = readJournal(this.dataDir, 5);
+      const mind = this.mindLog.tail(80)
+        .filter((event) => Date.parse(event.ts) >= dayStart)
+        .map((event) => ({ at: event.ts, type: event.type, text: event.summary, refs: event.refs ?? {} }));
+      const timeline = [
+        ...this.state.agenda.map((item) => ({
+          at: `${p.date}T${item.time}:00`, kind: 'agenda', text: `${item.title} · ${item.place}`,
+        })),
+        ...mind.map((event) => ({ at: event.at, kind: event.type, text: event.text })),
+        ...journal.map((entry) => ({
+          at: entry.ts, kind: 'journal', text: `${entry.kind}：${entry.text.slice(0, 120)}`,
+        })),
+      ]
+        .filter((item) => Number.isFinite(Date.parse(item.at)))
+        .sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
+        .slice(-120);
+
+      const earliest = records.reduce((min, record) => {
+        const t = Date.parse(record.createdAt || record.ts);
+        return Number.isFinite(t) && t < min ? t : min;
+      }, Number.POSITIVE_INFINITY);
+      const daysTogether = Number.isFinite(earliest)
+        ? Math.max(1, Math.ceil((now.getTime() - earliest) / 86_400_000))
+        : null;
+      const model = deriveUserModel({ records, now, tz: this.tz(), maxItems: 8 });
+      const musingToday = this.state.musingDay === p.date ? this.state.musingCount : 0;
+
+      return {
+        name: this.cfg().displayName || '大肥鱼',
+        now: {
+          date: p.date, weekday: p.weekday, time: `${String(p.hour).padStart(2, '0')}:${String(p.minute).padStart(2, '0')}`,
+          mood: Math.round(this.state.mood), energy: Math.round(this.state.energy),
+          activity: this.state.activity, location: this.state.location, sleeping: this.state.sleeping,
+        },
+        agenda: this.state.agenda.map((item) => ({ ...item })),
+        profile: profile ? {
+          name: profile.name, relation: profile.relation, birthday: profile.birthday, notes: profile.notes.slice(0, 3),
+        } : null,
+        counts: {
+          proactiveToday: this.countToday(), proactiveCap: this.cfg().proactiveDailyCap,
+          musingToday, musingCap: Number.isFinite(this.cfg().musingDailyCap) ? this.cfg().musingDailyCap : 2,
+          unanswered: this.state.cognitionUnanswered ?? 0,
+        },
+        relationship: {
+          name: profile?.name || person?.details?.aliases?.[0] || '',
+          relation: profile?.relation || person?.details?.relationLabel || '',
+          birthday: profile?.birthday || '',
+          closeness: typeof person?.details?.closeness === 'number' ? person.details.closeness : 0.5,
+          daysTogether,
+          memories: stats.records,
+          promises: store.openThreads(0).length,
+          surfaced: Object.keys(this.state.surfacedMemories ?? {}).length,
+          latestJournal: journal[0]?.text.slice(0, 160) ?? '',
+        },
+        model: model.items.map((item) => ({
+          key: item.key, kind: item.kind, text: item.text, confidence: item.confidence,
+          evidence: item.evidenceRefs.length,
+        })),
+        decision: this.state.lastProactiveDecision ?? null,
+        timeline,
+        mind: mind.slice(-8),
+        memory: {
+          records: stats.records, events: stats.events, threads: store.openThreads(0).length,
+          rules: store.rules(100).length, people: store.people().length,
+          archived: records.filter((record) => record.archived).length,
+          merged: records.filter((record) => record.details?.merged === true).length,
+          bytes: store.fileInfo().bytes,
+        },
+      };
+    }
+    if (method === 'constellation') {
+      const now = Date.now();
+      const all = store.entries().filter((record) => record.reviewStatus === 'approved' && !record.archived);
+      const coreKinds = new Set(['rule', 'person', 'self', 'thread']);
+      const core = all.filter((record) => coreKinds.has(record.kind));
+      const rest = all
+        .filter((record) => !coreKinds.has(record.kind))
+        .sort((a, b) => {
+          const score = (record: MemoryRecord) => record.importance * 2
+            + Math.max(0, 1 - (now - Date.parse(record.ts)) / (30 * 86_400_000));
+          return score(b) - score(a);
+        });
+      const picked = [...core, ...rest].slice(0, 260);
+      const nodes = picked.map((record) => ({
+        id: record.id,
+        kind: record.kind,
+        text: record.text.slice(0, 120),
+        ts: record.ts,
+        date: formatLocal(record.ts, this.tz()).slice(0, 10),
+        importance: record.importance,
+        confidence: record.confidence,
+        scope: record.scope,
+        tags: record.tags.slice(0, 4),
+        evidence: (record.details?.evidence ?? record.details?.evidenceRefs ?? []).slice(0, 3),
+        subjectKey: record.subjectKey ?? '',
+      }));
+      const byId = new Map(nodes.map((node) => [node.id, node]));
+      const edges: Array<{ a: string; b: string; type: string }> = [];
+      const seen = new Set<string>();
+      const addEdge = (a: string, b: string, type: string) => {
+        if (a === b || !byId.has(a) || !byId.has(b)) return;
+        const key = a < b ? `${a}|${b}` : `${b}|${a}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        if (edges.length < 700) edges.push({ a, b, type });
+      };
+      const bySubject = new Map<string, string[]>();
+      const byTag = new Map<string, string[]>();
+      for (const node of nodes) {
+        if (node.subjectKey) bySubject.set(node.subjectKey, [...(bySubject.get(node.subjectKey) ?? []), node.id]);
+        for (const tag of node.tags) {
+          if (['legacy-chat', 'recap', 'musing', 'thought', 'handoff-summary'].includes(tag)) continue;
+          byTag.set(tag, [...(byTag.get(tag) ?? []), node.id]);
+        }
+      }
+      for (const ids of bySubject.values()) {
+        for (let index = 1; index < ids.length; index += 1) addEdge(ids[0], ids[index], 'subject');
+      }
+      for (const ids of byTag.values()) {
+        if (ids.length < 2 || ids.length > 6) continue;
+        for (let index = 1; index < ids.length; index += 1) addEdge(ids[0], ids[index], 'tag');
+      }
+      // 同一天、同一会话里的记忆本来就是一段经历：给星图一层淡淡的“同日”连线。
+      const byDay = new Map<string, string[]>();
+      for (const node of nodes) {
+        const key = `${node.scope}|${node.date}`;
+        byDay.set(key, [...(byDay.get(key) ?? []), node.id]);
+      }
+      for (const ids of byDay.values()) {
+        if (ids.length < 2 || ids.length > 8) continue;
+        for (let index = 1; index < ids.length; index += 1) addEdge(ids[0], ids[index], 'day');
+      }
+      for (const record of picked) {
+        const threadId = typeof record.details?.threadId === 'string' ? record.details.threadId : '';
+        if (threadId) addEdge(record.id, threadId, 'thread');
+        const personId = typeof record.details?.personId === 'string' ? record.details.personId : '';
+        if (personId) addEdge(record.id, personId, 'person');
+      }
+      return { nodes, edges, total: all.length, shown: nodes.length, generatedAt: new Date().toISOString() };
+    }
     if (method === 'search') {
       const query = typeof list[0] === 'string' ? list[0].trim() : '';
       if (!query) throw new Error('search 需要关键词');
       const scope = typeof list[1] === 'string' ? list[1].trim() : '';
-      const limit = Math.min(20, Math.max(1, Number(list[2]) || 8));
+      const limit = Math.min(50, Math.max(1, Number(list[2]) || 20));
+      const records = new Map(store.entries().map((record) => [record.id, record]));
       const hits = store.search(query, {
         limit,
         scope: scope === '*' ? undefined : (scope || this.activeScope()),
@@ -351,15 +883,22 @@ export class CompanionWorld implements World {
         kinds: MEMORY_KINDS,
       });
       return {
-        hits: hits.map((hit) => ({
-          id: hit.id,
-          kind: hit.kind,
-          scope: hit.scope,
-          ts: hit.ts,
-          date: formatLocal(hit.ts, this.tz()).slice(0, 10),
-          score: hit.score,
-          snippet: hit.snippet,
-        })),
+        hits: hits.map((hit) => {
+          const record = hit.id ? records.get(hit.id) : undefined;
+          return {
+            id: hit.id,
+            kind: hit.kind,
+            scope: hit.scope,
+            ts: hit.ts,
+            date: formatLocal(hit.ts, this.tz()).slice(0, 10),
+            score: hit.score,
+            text: hit.text.slice(0, 400),
+            snippet: hit.snippet,
+            importance: record?.importance ?? 0.45,
+            tags: (record?.tags ?? []).slice(0, 5),
+            evidence: (record?.details?.evidence ?? []).slice(0, 3),
+          };
+        }),
       };
     }
     if (method === 'merges') {
@@ -440,6 +979,8 @@ export class CompanionWorld implements World {
   async start(host: WorldHost): Promise<void> {
     this.host = host;
     this.stopped = false;
+    this.qqChannelRunning = this.cfg().qqChannelEnabled;
+    if (this.qqChannelRunning) void this.oneBot.start(true).catch(() => {});
     ensureDir(this.dataDir);
     host.log.info('[companion] 启动', { dataDir: this.dataDir, tz: this.tz() });
     this.snapshot = new SnapshotPusher({
@@ -476,6 +1017,10 @@ export class CompanionWorld implements World {
     await this.snapshot?.close();
     this.snapshot = null;
     this.save(true);
+    await this.oneBot.stop();
+    this.qqChannelRunning = false;
+    this.stopTogetherObserver();
+    await this.together.close().catch((error) => this.host?.log.warn('[companion] 一起看关闭失败', String(error)));
     this.memoryStore.close();
     this.host = null;
   }
@@ -595,11 +1140,23 @@ export class CompanionWorld implements World {
     this.save(false);
   }
 
+  private async syncQqChannel(): Promise<void> {
+    const wanted = this.cfg().qqChannelEnabled;
+    if (wanted === this.qqChannelRunning) return;
+    this.qqChannelRunning = wanted;
+    if (wanted) {
+      await this.oneBot.start(true).catch((error) => this.host?.log.warn('[companion] QQ 启动失败', String(error)));
+    } else {
+      await this.oneBot.stop().catch((error) => this.host?.log.warn('[companion] QQ 停止失败', String(error)));
+    }
+  }
+
   private async tick(force: boolean): Promise<void> {
     if (this.stopped && !force) return;
     if (this.tickRunning) return;
     this.tickRunning = true;
     try {
+      await this.syncQqChannel();
       this.refreshState();
       this.captureIncoming();
       if (this.cfg().memoryEnabled) this.memoryStore.maybePrune(this.cfg().memoryRetentionDays);
@@ -617,6 +1174,9 @@ export class CompanionWorld implements World {
       await this.refreshWeather(now);
       await this.refreshHolidays(now);
       this.scheduleProactiveTriggers(now);
+      void this.maybeBiliSelfWatch(now);
+      void this.pollBiliNotices(now);
+      void this.remindPendingQqMedia(now);
       await this.pushContext();
       const woke = await this.maybeProactive(now);
       if (!woke) await this.maybeMuse(now);
@@ -1158,6 +1718,22 @@ export class CompanionWorld implements World {
     if (isDuplicateSent(intention.text, this.state.sentTexts ?? [], now.getTime())) {
       return { ok: false, reason: '最近说过相似的话' };
     }
+    if (this.proactiveMode() === 'utility') {
+      const decision = this.decideProactive(
+        { key: `intent:${intention.key}`, text: intention.text, salience: intention.salience, source: 'contact' },
+        now,
+        { busy: false, minutesSinceUser: null },
+      );
+      if (!decision.ok) {
+        this.mind('review', `念头暂缓：${decision.reason}`, {
+          score: decision.score,
+          code: decision.code,
+          ...(decision.benefit !== undefined ? { benefit: decision.benefit } : {}),
+          ...(decision.cost !== undefined ? { cost: decision.cost } : {}),
+        });
+        return { ok: false, reason: decision.reason };
+      }
+    }
     const text = `【自己的念头】${intention.text}
 这是你自己想到的，可以自然地说一句，也可以不说。`;
     this.wakeReason = intention.text;
@@ -1216,6 +1792,11 @@ export class CompanionWorld implements World {
       try {
         args = JSON.parse(tool.args || '{}') as Record<string, unknown>;
       } catch {
+        continue;
+      }
+      if (tool.name === 'onebot_call') {
+        const sent = onebotSendText(args);
+        if (sent) out.push(sent);
         continue;
       }
       const text = tool.name === 'pet_say' ? args.script
@@ -1583,6 +2164,18 @@ export class CompanionWorld implements World {
     if (Number.isFinite(lastSent) && now.getTime() - lastSent < CONTACT_GAP_MS) return false;
     const sinceTalkMs = lastUserAt ? now.getTime() - lastUserAt : null;
     const reason = trigger.reason;
+    // 身体触发是“她自己的事”，不该被社交打扰成本拦住：低精力直接去休息。
+    if (trigger.key === 'body:low-energy') {
+      this.state.activity = '打盹';
+      this.state.location = '床';
+      this.state.restUntil = new Date(now.getTime() + 30 * 60_000).toISOString();
+      this.mind('action', '精力太低，先去休息而不是找人', { action: 'rest', trigger: trigger.key });
+      this.snapshot?.invalidate();
+      this.state.pendingTrigger = null;
+      this.state.proactiveDueAt = null;
+      this.save(true);
+      return true;
+    }
     const text = buildProactiveText({
       state: this.state,
       reason,
@@ -1600,52 +2193,54 @@ export class CompanionWorld implements World {
       action: 'contact' as const,
       source: trigger.source,
     };
-    const score = scoreThought(candidate, { busy });
-    this.mind('candidate', `${score >= 0.55 ? '保留' : '暂缓'}：${reason}`, {
+    const decision = this.decideProactive(candidate, now, {
+      busy,
+      minutesSinceUser: sinceTalkMs === null ? null : sinceTalkMs / 60_000,
+    });
+    const score = decision.score;
+    this.state.lastProactiveDecision = {
+      at: now.toISOString(),
+      mode: decision.mode,
+      code: decision.code,
+      score: decision.score,
+      benefit: decision.benefit ?? 0,
+      cost: decision.cost ?? 0,
+      threshold: decision.threshold ?? (decision.mode === 'gate' ? 0.55 : 0.12),
+      source: candidate.source,
+      reason: decision.reason,
+      terms: decision.terms ?? [],
+    };
+    this.mind('candidate', `${decision.ok ? '保留' : '暂缓'}：${reason}`, {
       score,
       action: 'contact',
       source: candidate.source,
+      mode: decision.mode,
+      code: decision.code,
+      ...(decision.benefit !== undefined ? { benefit: decision.benefit } : {}),
+      ...(decision.cost !== undefined ? { cost: decision.cost } : {}),
       ...(busy ? { gate: 'busy' } : {}),
     });
     const clear = () => {
       this.state.pendingTrigger = null;
       this.state.proactiveDueAt = null;
     };
-    if (busy) {
-      this.mind('review', '当前日程繁忙，暂缓联系', { score, gate: 'busy' });
-      clear();
-      this.save(true);
+    if (!decision.ok) {
+      this.mind('review', decision.reason, {
+        score,
+        code: decision.code,
+        ...(decision.benefit !== undefined ? { benefit: decision.benefit } : {}),
+        ...(decision.cost !== undefined ? { cost: decision.cost } : {}),
+        ...(decision.code === 'unanswered' ? { unanswered: this.state.cognitionUnanswered } : {}),
+      });
+      // 未回应是“等她回来再评估”，不清 pending；其余暂缓直接清掉，等下一个触发。
+      if (decision.code !== 'unanswered') {
+        clear();
+        this.save(true);
+      }
       return false;
     }
-    if ((this.state.cognitionUnanswered ?? 0) >= 2) {
-      this.mind('review', '连续未回应，先不打扰；24 小时后再评估', { score, unanswered: this.state.cognitionUnanswered });
-      // 不丢 pending，也不清 triggerSeen；等用户回复或 24h 自动恢复。
-      return false;
-    }
-    if (score < 0.55) {
-      this.mind('review', `候选价值不足（${score}），先不联系`, { score });
-      clear();
-      this.save(true);
-      return false;
-    }
-    // 低精力/身体触发优先做自己的事，而不是硬聊。
-    if (trigger.key === 'body:low-energy') {
-      this.state.activity = '打盹';
-      this.state.location = '床';
-      this.state.restUntil = new Date(now.getTime() + 30 * 60_000).toISOString();
-      this.mind('action', '精力太低，先去休息而不是找人', { score, action: 'rest' });
-      this.snapshot?.invalidate();
-      clear();
-      this.save(true);
-      return true;
-    }
+    // 低精力分支已提前到决策之前，避免“刚聊完”的打扰成本阻止她休息。
 
-    if (isDuplicateSent(reason, this.state.sentTexts ?? [], now.getTime())) {
-      this.mind('review', '最近说过相似的话，暂缓', { score });
-      clear();
-      this.save(true);
-      return false;
-    }
     this.wakeReason = reason;
     const pushed = await this.push('companion.proactive', text, 'flush');
     if (!pushed?.delivered) {
@@ -1676,6 +2271,95 @@ export class CompanionWorld implements World {
     return true;
   }
 
+  /**
+   * 开口决策的唯一入口：
+   * - gate：0.4.x 旧闸门（显著性 + 来源权重 − 惩罚，阈值 0.55，忙/未回应/重复硬拦）；
+   * - shadow：照旧行为，只把效用模型的结果写进日志，用来对照；
+   * - utility：由头值 − 打扰成本 ≥ 阈值（默认 0.12，黏人度 1.3），忙只加成本。
+   */
+  private proactiveMode(): 'gate' | 'shadow' | 'utility' {
+    const raw = this.cfg().proactiveDecision;
+    if (raw === '固定阈值' || raw === 'gate') return 'gate';
+    if (raw === '只记录' || raw === 'shadow') return 'shadow';
+    return 'utility';
+  }
+
+  private decideProactive(
+    candidate: { key: string; text: string; salience: number; source: string },
+    now: Date,
+    input: { busy: boolean; minutesSinceUser: number | null },
+  ): {
+    ok: boolean; score: number; reason: string; code: string;
+    mode: 'gate' | 'shadow' | 'utility'; benefit?: number; cost?: number;
+    threshold?: number; terms?: Array<{ label: string; value: number }>;
+  } {
+    const cfg = this.cfg();
+    const mode = this.proactiveMode();
+    const unanswered = this.state.cognitionUnanswered ?? 0;
+    const repeated = isDuplicateSent(candidate.text, this.state.sentTexts ?? [], now.getTime());
+    const lastProactive = Date.parse(this.state.lastProactiveAt ?? '');
+    const hoursSinceProactive = Number.isFinite(lastProactive)
+      ? (now.getTime() - lastProactive) / 3_600_000
+      : null;
+    const closeness = this.memoryStore.people()[0]?.details?.closeness;
+    // 记忆类由头（话头 / 旧事 / 承诺）值得打断：绕过“刚聊过”的成本。
+    const bypassRecentChat = ['memory', 'thread', 'promise'].includes(candidate.source);
+    const utility = computeUtility({
+      source: candidate.source,
+      salience: candidate.salience,
+      busy: input.busy,
+      minutesSinceUser: input.minutesSinceUser,
+      hoursSinceProactive,
+      unanswered,
+      repeated,
+      closeness: typeof closeness === 'number' ? closeness : 0.7,
+      clinginess: cfg.proactiveClinginess,
+      bypassRecentChat,
+    });
+    const gateScore = scoreThought(candidate, { unanswered, busy: input.busy });
+    const gateOk = !input.busy && !repeated && unanswered < 2 && gateScore >= 0.55;
+    const gateReason = input.busy ? '当前日程繁忙'
+      : repeated ? '最近说过相似的话'
+        : unanswered >= 2 ? '连续未回应，先不打扰；24 小时后再评估'
+          : `候选价值不足（${gateScore}），先不联系`;
+
+    if (mode === 'gate') {
+      return {
+        ok: gateOk,
+        score: gateScore,
+        reason: gateOk ? '旧闸门放行' : gateReason,
+        code: gateOk ? 'send' : input.busy ? 'busy' : repeated ? 'duplicate' : unanswered >= 2 ? 'unanswered' : 'low-value',
+        mode,
+        threshold: 0.55,
+        terms: [],
+      };
+    }
+    if (mode === 'shadow') {
+      return {
+        ok: gateOk,
+        score: utility.score,
+        reason: `[shadow] 效用${utility.ok ? '会放行' : '会拦住'}（${utility.reason}）；${gateOk ? '旧闸门放行' : `旧闸门拦住：${gateReason}`}`,
+        code: utility.code,
+        mode,
+        benefit: utility.benefit,
+        cost: utility.cost,
+        threshold: utility.threshold,
+        terms: utility.terms,
+      };
+    }
+    return {
+      ok: utility.ok,
+      score: utility.score,
+      reason: utility.reason,
+      code: utility.code,
+      mode,
+      benefit: utility.benefit,
+      cost: utility.cost,
+      threshold: utility.threshold,
+      terms: utility.terms,
+    };
+  }
+
   private stateSummary(): string {
     const p = localParts(new Date(), this.tz());
     const cur = currentItem(this.state.agenda, p.minutes);
@@ -1687,6 +2371,1025 @@ export class CompanionWorld implements World {
     if (cur) bits.push(`当前日程：${agendaLine(cur)}`);
     if (next) bits.push(`下一件：${agendaLine(next)}`);
     return `${bits.join('；')}。`;
+  }
+
+  private async remindPendingQqMedia(now: Date): Promise<void> {
+    if (!this.host || !this.cfg().qqChannelEnabled) return;
+    if (now.getTime() - this.lastMediaReminderAt < 30 * 60_000) return;
+    const pending = this.oneBot.mediaPendingMeaning(3);
+    if (!pending.length) return;
+    this.lastMediaReminderAt = now.getTime();
+    const blobs: Array<{ bytes: Uint8Array; mime: string; name: string; fallbackText: string }> = [];
+    const keys: string[] = [];
+    for (const record of pending) {
+      const bytes = this.oneBot.mediaRead(record);
+      if (!bytes) continue;
+      const ext = record.mime.split('/')[1] || 'img';
+      blobs.push({ bytes, mime: record.mime, name: `qq-image-${record.hash.slice(0, 8)}.${ext}`, fallbackText: `[待记含义的图片 ${record.hash.slice(0, 8)}]` });
+      keys.push(record.hash.slice(0, 8));
+      this.oneBot.mediaMarkReminded(record);
+    }
+    if (!blobs.length) return;
+    void this.host.pushEvent({
+      type: 'companion.media', ts: now.toISOString(), source: this.id, origin: 'internal',
+      senderKey: 'companion.media',
+      text: `[图片补记] 这几张图之前看过但还没记含义：${keys.join('、')}。看完直接用 qq_media_note 补一句；记不得就说记不得，不要猜。`,
+      blobs,
+      meta: { kind: 'companion.media', keys },
+    }, { trigger: 'debounce' }).catch((error) => {
+      this.host?.log.warn('[companion] 图片补记提醒投递失败', String(error));
+    });
+  }
+
+  private async handleQqMessage(message: {
+    at: string; nickname: string; text: string; messageType: 'private' | 'group';
+    userId: string; groupId: string; messageId: string; imageFiles: string[]; imageKeys: string[];
+    files: string[]; voices: string[]; filePaths: string[]; voicePaths: string[]; quote: string; voiceText?: string;
+  }): Promise<void> {
+    if (!this.cfg().qqChannelEnabled) return;
+    if (message.voicePaths?.length && this.cfg().qqTranscribeVoice) {
+      const heard = await this.voice.transcribe(message.voicePaths[0]!);
+      message.voiceText = heard.text || '';
+      if (heard.error) this.mind('error', `语音转写失败：${heard.error}`, { kind: 'stt' });
+    }
+    const selfId = this.oneBot.status().selfId;
+    const mentioned = Boolean(selfId && message.text.includes(`@${selfId}`));
+    const wake = message.messageType === 'private' || mentioned;
+    if (wake) {
+      this.lastUserAt = Date.now();
+      this.lastUserProbe = 0;
+    }
+    this.state.lastTalkAt = message.at;
+    const kind = message.messageType === 'group' ? '群' : '私聊';
+    const peer = message.messageType === 'group' ? message.groupId : message.userId;
+    const imageNotes: string[] = [];
+    const imageBlobs: Array<{ bytes: Uint8Array; mime: string; name: string; fallbackText: string }> = [];
+    for (const key of message.imageKeys) {
+      const record = this.oneBot.mediaGet(key);
+      if (!record) { imageNotes.push(key.slice(0, 8)); continue; }
+      if (record.meaning) { imageNotes.push(`${key.slice(0, 8)}=${record.meaning}`); continue; }
+      if (record.viewedAt) { imageNotes.push(`${key.slice(0, 8)}（看过未记含义）`); continue; }
+      const bytes = this.oneBot.mediaRead(record);
+      if (!bytes) { imageNotes.push(key.slice(0, 8)); continue; }
+      const ext = record.mime.split('/')[1] || 'img';
+      imageBlobs.push({ bytes, mime: record.mime, name: `qq-image-${key.slice(0, 8)}.${ext}`, fallbackText: `[图片 ${key.slice(0, 8)}]` });
+      this.oneBot.mediaMarkSeen(record);
+      imageNotes.push(`${key.slice(0, 8)}（看完先 qq_media_note 记含义）`);
+    }
+    const imageInfo = imageNotes.join(', ');
+    const extras = [
+      message.quote ? `[引用 ${message.quote}]` : '',
+      imageInfo ? `（图 ${imageInfo}）` : '',
+      message.filePaths?.length ? `（文件 ${message.filePaths.length}）` : '',
+      message.voicePaths?.length ? `（语音 ${message.voicePaths.length}${message.voiceText ? `，转写：${message.voiceText}` : '，未识别'}）` : '',
+    ].filter(Boolean).join('');
+    const spoken = message.text || message.voiceText || '';
+    const text = `[QQ ${kind}] ${message.nickname}：${spoken || '[空消息]'}${extras}`;
+    if (message.messageType === 'group' && !mentioned && !this.state.pendingTrigger) {
+      // 群里没有点她：不直接唤醒主 session，交给 utility 决定要不要接一句。
+      const at = message.at;
+      const key = `qq:group:${message.groupId}:${message.messageId}`;
+      this.state.pendingTrigger = {
+        key,
+        reason: `QQ 群里 ${message.nickname} 说：${(spoken || '[空消息]').slice(0, 80)}`,
+        source: 'qq',
+        salience: 0.55,
+        at,
+      };
+      this.state.triggerSeen = Object.fromEntries(
+        Object.entries({ ...(this.state.triggerSeen ?? {}), [key]: at })
+          .filter(([, ts]) => Date.parse(ts) > Date.now() - 7 * 86_400_000)
+          .slice(-100),
+      );
+      this.state.proactiveDueAt = null;
+      this.mind('trigger', `QQ 群触发：${message.nickname}`, { trigger: key, source: 'qq', salience: 0.55 });
+    }
+    if (this.host) {
+      // 私聊/被 @：直接交给主 session；普通群聊只归档，由 utility 的 pendingTrigger 决定。
+      void this.host.pushEvent({
+        type: 'qq.message',
+        ts: message.at,
+        source: 'qq',
+        origin: 'external',
+        senderKey: message.userId,
+        text,
+        meta: {
+          kind: 'qq.message', messageType: message.messageType, groupId: message.groupId,
+          userId: message.userId, messageId: message.messageId, imageKeys: message.imageKeys,
+          quote: message.quote,
+        },
+        ...(imageBlobs.length ? { blobs: imageBlobs } : {}),
+      }, { trigger: wake ? 'flush' : 'piggyback', deliver: wake }).catch((error) => {
+        this.host?.log.warn('[companion] QQ 事件投递失败', String(error));
+      });
+    } else if (this.cfg().memoryEnabled && this.cfg().memoryCapture) {
+      // 没有 host（单测/离线）时至少保留原始事件；有 host 时 captureIncoming 会统一写入，避免重复。
+      this.memoryStore.appendEvent({ text, ts: message.at, source: 'qq', scope: `qq:${message.messageType}:${peer}` });
+    }
+    this.save(false);
+  }
+
+  private async toolBiliSearch(args: Record<string, unknown>): Promise<string> {
+    if (!this.cfg().biliChannelEnabled) return 'B站通道未启用（可选功能，默认关闭）。';
+    const keyword = trimText(args.keyword, 100);
+    if (!keyword) return 'bili_search 需要 keyword。';
+    const hits = await this.bili.search(keyword, Number(args.limit) || 5);
+    if (!hits.length) return `B站没有搜到「${keyword}」。`;
+    return hits.map((hit, index) => `${index + 1}. ${hit.bvid}｜${hit.title}｜${hit.author}｜${hit.duration}`).join('\n');
+  }
+
+  private async toolBiliInfo(args: Record<string, unknown>): Promise<string> {
+    if (!this.cfg().biliChannelEnabled) return 'B站通道未启用（可选功能，默认关闭）。';
+    const bvid = trimText(args.bvid, 30);
+    if (!bvid) return 'bili_info 需要 bvid。';
+    const info = await this.bili.info(bvid);
+    return [
+      `${info.title}（${info.bvid}）`,
+      `UP：${info.owner}`,
+      `时长：${Math.floor(info.duration / 60)}:${String(info.duration % 60).padStart(2, '0')}`,
+      `播放：${info.play}`,
+      info.desc ? `简介：${info.desc.slice(0, 300)}` : '',
+    ].filter(Boolean).join('\n');
+  }
+
+  private async togetherOpen(input: string): Promise<Record<string, unknown>> {
+    const value = input.trim();
+    let url = value || 'https://www.bilibili.com/';
+    let bvid = '';
+    const bv = value.match(/(BV[0-9A-Za-z]{10})/);
+    if (bv) bvid = bv[1];
+    if (value && !/^https?:\/\//i.test(value)) {
+      if (!bvid) throw new Error('需要合法的 BV 号');
+      url = `https://www.bilibili.com/video/${bvid}`;
+    }
+    const parsed = new URL(url);
+    if (!/(^|\.)bilibili\.com$/i.test(parsed.hostname)) throw new Error('一起看只允许 B站链接');
+    this.togetherBvid = bvid;
+    await this.together.open(url);
+    this.startTogetherObserver();
+    return { ...(await this.together.status()), bvid } as unknown as Record<string, unknown>;
+  }
+
+  private async togetherAuto(query = ''): Promise<Record<string, unknown>> {
+    if (this.togetherAutoBusy) throw new Error('一起看正在打开，请稍等');
+    this.togetherAutoBusy = true;
+    try {
+    const wanted = query.trim();
+    let candidate: { bvid: string; title: string } | null = null;
+    if (wanted) {
+      const hits = await this.bili.search(wanted, 8).catch(() => []);
+      const first = hits[0];
+      if (first) candidate = { bvid: first.bvid, title: first.title };
+    } else {
+      const history = await this.bili.history(8).catch(() => []);
+      const first = history.find((item) => item.bvid);
+      if (first) candidate = { bvid: first.bvid, title: first.title };
+      if (!candidate) {
+        const popular = await this.bili.popular(8).catch(() => []);
+        const firstPopular = popular[0];
+        if (firstPopular) candidate = { bvid: firstPopular.bvid, title: firstPopular.title };
+      }
+    }
+    if (!candidate) throw new Error(wanted ? `没有搜到「${wanted}」` : '没有可看的视频');
+    await this.togetherOpen(candidate.bvid);
+    const status = await this.togetherControl('play');
+    return { ...status, bvid: candidate.bvid, title: candidate.title };
+    } finally {
+      this.togetherAutoBusy = false;
+    }
+  }
+
+  private async togetherControl(action: string, seconds = 0): Promise<Record<string, unknown>> {
+    const status = await this.together.control(action, seconds);
+    if (action === 'play' && this.togetherBvid) {
+      const seen = this.biliWatch.find({ bvid: this.togetherBvid, title: status.title });
+      if (!seen) this.biliWatch.record({ at: new Date().toISOString(), bvid: this.togetherBvid, title: status.title || this.togetherBvid, via: 'browser' });
+      this.startTogetherObserver();
+    }
+    return status as unknown as Record<string, unknown>;
+  }
+
+  private clearTogetherSamples(): void {
+    for (const path of this.togetherSamples) {
+      if (path !== this.lastTogetherFrame) {
+        try { unlinkSync(path); } catch { /* ignore */ }
+      }
+    }
+    this.togetherSamples = [];
+  }
+
+  private startTogetherObserver(): void {
+    if (!this.cfg().biliChannelEnabled) return;
+    if (this.togetherObserveTimer) clearInterval(this.togetherObserveTimer);
+    this.togetherObserveInFlight = false;
+    this.lastTogetherObserveAt = 0;
+    this.togetherSamples = [];
+    const captureMs = Math.max(300, Math.round((Number(this.cfg().biliCaptureIntervalSec) || 0.8) * 1000));
+    this.togetherObserveTimer = setInterval(() => { void this.captureTogetherObservation(); }, captureMs);
+    this.togetherObserveTimer.unref?.();
+  }
+
+  private stopTogetherObserver(): void {
+    if (this.togetherObserveTimer) clearInterval(this.togetherObserveTimer);
+    this.togetherObserveTimer = null;
+    this.togetherObserveInFlight = false;
+    this.clearTogetherSamples();
+  }
+
+  private async captureTogetherObservation(): Promise<void> {
+    if (!this.host || this.togetherObserveInFlight) return;
+    this.togetherObserveInFlight = true;
+    try {
+      const status = await this.together.status();
+      if (!status.open || status.paused) {
+        this.clearTogetherSamples();
+        return;
+      }
+      const frame = await this.togetherFrame();
+      const every = Math.max(2_000, Math.round((Number(this.cfg().biliObserveIntervalSec) || 5) * 1000));
+      this.togetherSamples.push(frame.path);
+      if (this.togetherSamples.length > 9) {
+        for (const old of this.togetherSamples.slice(0, -9)) { try { unlinkSync(old); } catch { /* ignore */ } }
+        this.togetherSamples = this.togetherSamples.slice(-9);
+      }
+      if (Date.now() - this.lastTogetherObserveAt < every) return;
+      const cells = Math.max(2, Math.min(9, Math.floor(Number(this.cfg().biliObserveCells) || 4)));
+      let chosen = this.togetherSamples.slice(-cells);
+      if (chosen.length < 2) return;
+      // montage 的每一行必须等宽：奇数张时丢掉最早的一张，3 张用一行。
+      if (chosen.length > 3) chosen = chosen.slice(-(chosen.length - (chosen.length % 2)));
+      const cols = chosen.length === 3 ? 3 : chosen.length <= 2 ? chosen.length : 2;
+      const rows = Math.ceil(chosen.length / cols);
+      const dir = join(this.dataDir, 'bili', 'together', 'observations');
+      mkdirSync(dir, { recursive: true });
+      const montage = join(dir, `observe-${Date.now()}.jpg`);
+      if (!montageImages(chosen, montage, cols, rows)) { this.clearTogetherSamples(); return; }
+      const bytes = readFileSync(montage);
+      this.lastTogetherObserveAt = Date.now();
+      for (const old of this.togetherSamples) {
+        if (old !== this.lastTogetherFrame) { try { unlinkSync(old); } catch { /* ignore */ } }
+      }
+      this.togetherSamples = [];
+      let accepts = false;
+      try { accepts = this.host.modelFacts.accepts('image/jpeg') === true; } catch { accepts = false; }
+      void this.host.pushEvent({
+        type: 'bili.together.frame', ts: new Date().toISOString(), source: 'bilibili', origin: 'external', senderKey: 'bili.together',
+        text: `[一起看 · 观察] ${status.title || this.togetherBvid || 'B站视频'} ${Math.floor(status.time)}/${Math.floor(status.duration)} 秒；${Math.round(every / 1000)} 秒图集（每 ${Number(this.cfg().biliCaptureIntervalSec) || 0.8} 秒采样，${chosen.length} 格）。`,
+        meta: { kind: 'bili.together.frame', bvid: this.togetherBvid, title: status.title, time: status.time, path: montage, cells: chosen.length },
+        ...(accepts ? { blobs: [{ bytes, mime: 'image/jpeg', name: 'together-observation.jpg', fallbackText: '[一起看观察图集]' }] } : {}),
+      }, { trigger: 'debounce' }).catch((error) => {
+        this.host?.log.warn('[companion] 一起看观察帧投递失败', String(error));
+      });
+    } catch (error) {
+      this.host?.log.warn('[companion] 一起看自动截图失败', String(error));
+    } finally {
+      this.togetherObserveInFlight = false;
+    }
+  }
+
+  private async togetherFrame(): Promise<{ path: string; status: TogetherStatus; bytes: Uint8Array }> {
+    const dir = join(this.dataDir, 'bili', 'together', 'frames');
+    const path = join(dir, `frame-${Date.now()}.jpg`);
+    const shot = await this.together.frame(path);
+    this.lastTogetherFrame = shot.path;
+    return { ...shot, status: await this.together.status() };
+  }
+
+  private biliShareFile(): string {
+    return join(this.dataDir, 'bili', 'share-state.json');
+  }
+
+  private biliShareCount(): { day: string; count: number } {
+    const day = new Date().toISOString().slice(0, 10);
+    try {
+      const saved = JSON.parse(readFileSync(this.biliShareFile(), 'utf8')) as Record<string, unknown>;
+      return saved.day === day ? { day, count: Number(saved.count || 0) } : { day, count: 0 };
+    } catch {
+      return { day, count: 0 };
+    }
+  }
+
+  private async toolBiliCommentReply(args: Record<string, unknown>): Promise<string> {
+    if (!this.cfg().biliChannelEnabled) return 'B站通道未启用（可选功能，默认关闭）。';
+    if (!this.cfg().biliReplyEnabled) return 'B站评论回复未开启（worlds.companion.biliReplyEnabled=false）。';
+    if (args.confirm !== true) return '发评论会改外部状态，需要 confirm=true。';
+    const bvid = trimText(args.bvid, 30);
+    const text = trimText(args.text, 500);
+    if (!bvid || !text) return 'bili_comment_reply 需要 bvid 和 text。';
+    const mentionOwner = args.mention_owner === true;
+    if (mentionOwner && !this.biliOwnerUid) return '没有主人 UID，不能保证 @；先填 worlds.companion.biliOwnerUid。';
+    const state = this.biliShareCount();
+    const limit = Math.max(1, Math.min(20, Number(this.cfg().biliDailyComments) || 3));
+    if (state.count >= limit) return `今天评论额度用完了（${limit} 次）。`;
+    try {
+      const result = await this.bili.comment(bvid, text, {
+        root: Number(args.root) || undefined,
+        parent: Number(args.parent) || undefined,
+        mentionUid: this.biliOwnerUid,
+        mentionOwner,
+        imagePath: trimText(args.image, 500) || undefined,
+      });
+      if (!result.ok) return `评论失败：${result.message}`;
+      mkdirSync(join(this.dataDir, 'bili'), { recursive: true });
+      writeFileSync(this.biliShareFile(), JSON.stringify({ day: state.day, count: state.count + 1 }), 'utf8');
+      return `${result.message}${result.rpid ? `（rpid ${result.rpid}）` : ''}${result.imageUploaded ? '（带图）' : result.imageError ? `（图片没传上去：${result.imageError}）` : ''}${result.mentioned === false ? '；@ 没被服务端识别' : ''}`;
+    } catch (error) {
+      return `评论失败：${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+
+  private async toolBiliProfile(): Promise<string> {
+    if (!this.cfg().biliChannelEnabled) return 'B站通道未启用（可选功能，默认关闭）。';
+    const [account, nav] = await Promise.all([this.bili.memberAccount(), this.bili.nav().catch(() => null)]);
+    return `昵称：${account.uname}；签名：${account.sign || '（空）'}；头像：${account.face || nav?.face || '未知'}`;
+  }
+
+  private async toolBiliUpdateProfile(args: Record<string, unknown>): Promise<string> {
+    if (!this.cfg().biliChannelEnabled) return 'B站通道未启用（可选功能，默认关闭）。';
+    if (!this.cfg().biliInteractEnabled) return 'B站账号动作未开启（worlds.companion.biliInteractEnabled=false）。';
+    if (args.confirm !== true) return '改资料会写外部状态，需要 confirm=true。';
+    const signature = typeof args.signature === 'string' ? args.signature : '';
+    const avatar = trimText(args.avatar, 500);
+    if (!signature && !avatar) return '至少给 signature 或 avatar。';
+    const results: string[] = [];
+    if (signature) {
+      const r = await this.bili.updateSignature(signature);
+      results.push(r.ok ? r.message : `签名失败：${r.message}`);
+    }
+    if (avatar) {
+      const r = await this.bili.updateFace(avatar);
+      results.push(r.ok ? r.message : `头像失败：${r.message}`);
+    }
+    return results.join('；');
+  }
+
+  private async toolBiliAct(args: Record<string, unknown>): Promise<string> {
+    if (!this.cfg().biliChannelEnabled) return 'B站通道未启用（可选功能，默认关闭）。';
+    if (!this.cfg().biliInteractEnabled) return 'B站账号动作未开启（worlds.companion.biliInteractEnabled=false）。';
+    const action = trimText(args.action, 30);
+    const bvid = trimText(args.bvid, 30);
+    const text = trimText(args.text, 300);
+    try {
+      if (action === 'like' || action === 'unlike') {
+        if (!bvid) return 'like 需要 bvid。';
+        const r = await this.bili.like(bvid, action === 'like');
+        return r.ok ? r.message : `失败：${r.message}`;
+      }
+      if (action === 'coin') {
+        if (!bvid) return 'coin 需要 bvid。';
+        const r = await this.bili.coin(bvid, Number(args.count) || 1);
+        return r.ok ? r.message : `失败：${r.message}`;
+      }
+      if (action === 'favorite' || action === 'unfavorite') {
+        if (!bvid) return 'favorite 需要 bvid。';
+        const r = await this.bili.favorite(bvid, action === 'favorite');
+        return r.ok ? r.message : `失败：${r.message}`;
+      }
+      if (action === 'follow' || action === 'unfollow') {
+        if (!bvid) return 'follow 需要 bvid。';
+        const r = await this.bili.follow(bvid, action === 'follow');
+        return r.ok ? r.message : `失败：${r.message}`;
+      }
+      if (action === 'share') {
+        if (!bvid) return 'share 需要 bvid。';
+        const r = await this.bili.share(bvid);
+        return r.ok ? r.message : `失败：${r.message}`;
+      }
+      if (action === 'watch_later') {
+        if (!bvid) return 'watch_later 需要 bvid。';
+        const r = await this.bili.watchLater(bvid);
+        return r.ok ? r.message : `失败：${r.message}`;
+      }
+      if (action === 'danmaku') {
+        if (!bvid || !text) return 'danmaku 需要 bvid 和 text。';
+        const r = await this.bili.danmaku(bvid, text, Number(args.seconds) || 1);
+        return r.ok ? r.message : `失败：${r.message}`;
+      }
+      if (action === 'comment_like' || action === 'comment_unlike') {
+        if (!bvid || !Number(args.rpid)) return '需要 bvid 和 rpid。';
+        const r = await this.bili.commentAction(bvid, Number(args.rpid), action === 'comment_like');
+        return r.ok ? r.message : `失败：${r.message}`;
+      }
+      if (action === 'comment_delete') {
+        if (!bvid || !Number(args.rpid)) return '需要 bvid 和 rpid。';
+        const r = await this.bili.deleteComment(bvid, Number(args.rpid));
+        return r.ok ? r.message : `失败：${r.message}`;
+      }
+      if (action === 'dm_owner') {
+        if (!this.biliOwnerUid) return '没有主人 UID，不能私信主人。';
+        const payload = `${text}${bvid ? `${text ? ' ' : ''}https://www.bilibili.com/video/${bvid}` : ''}`.trim();
+        if (!payload) return 'dm_owner 需要 text 或 bvid。';
+        const r = await this.bili.dmSend(Number(this.biliOwnerUid), payload);
+        return r.ok ? r.message : `失败：${r.message}`;
+      }
+      return `未知动作：${action}`;
+    } catch (error) {
+      return `动作失败：${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+
+  private async toolBiliDmReply(args: Record<string, unknown>): Promise<string> {
+    if (!this.cfg().biliChannelEnabled) return 'B站通道未启用（可选功能，默认关闭）。';
+    if (!this.cfg().biliReplyEnabled) return 'B站私信回复未开启（worlds.companion.biliReplyEnabled=false）。';
+    if (args.confirm !== true) return '发私信会改外部状态，需要 confirm=true。';
+    const talkerId = Number(args.talker_id) || 0;
+    const text = trimText(args.text, 300);
+    if (!talkerId || !text) return 'bili_dm_reply 需要 talker_id 和 text。';
+    try {
+      const result = await this.bili.dmSend(talkerId, text);
+      return result.ok ? result.message : `私信失败：${result.message}`;
+    } catch (error) {
+      return `私信失败：${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+
+  private async toolBiliTogetherShare(args: Record<string, unknown>): Promise<string> {
+    if (!this.cfg().biliChannelEnabled) return 'B站通道未启用（可选功能，默认关闭）。';
+    if (!this.togetherBvid) return '还没有一起看的视频。';
+    if (!this.lastTogetherFrame) {
+      try { await this.togetherFrame(); } catch (error) { return `截帧失败：${error instanceof Error ? error.message : String(error)}`; }
+    }
+    return this.toolBiliCommentReply({
+      bvid: this.togetherBvid,
+      text: trimText(args.text, 300) || '这一帧给你看。',
+      image: this.lastTogetherFrame,
+      mention_owner: args.mention_owner === true,
+      confirm: true,
+    });
+  }
+
+  private async toolBiliTogetherOpen(args: Record<string, unknown>): Promise<string> {
+    if (!this.cfg().biliChannelEnabled) return 'B站通道未启用（可选功能，默认关闭）。';
+    try {
+      const input = trimText(args.bvid, 30) || trimText(args.url, 300);
+      const status = await this.togetherOpen(input);
+      return `一起看已打开：${status.title || status.url || input}。`;
+    } catch (error) {
+      return `打开失败：${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+
+  private async toolBiliTogetherAuto(args: Record<string, unknown>): Promise<string> {
+    if (!this.cfg().biliChannelEnabled) return 'B站通道未启用（可选功能，默认关闭）。';
+    try {
+      const status = await this.togetherAuto(trimText(args.query, 100));
+      return `一起看：${status.title || status.bvid || '已打开'}，正在播放。`;
+    } catch (error) {
+      return `自动找视频失败：${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+
+  private async toolBiliTogetherControl(args: Record<string, unknown>): Promise<string> {
+    if (!this.cfg().biliChannelEnabled) return 'B站通道未启用（可选功能，默认关闭）。';
+    const action = trimText(args.action, 20);
+    if (!['play', 'pause', 'seek', 'status'].includes(action)) return 'action 只能是 play/pause/seek/status。';
+    try {
+      const status = await this.togetherControl(action, Number(args.seconds) || 0);
+      return `一起看：${action}；${status.title || ''} ${Math.floor(Number(status.time) || 0)}/${Math.floor(Number(status.duration) || 0)} 秒${status.paused ? '（暂停）' : '（播放中）'}`;
+    } catch (error) {
+      return `控制失败：${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+
+  private async toolBiliTogetherFrame(): Promise<string | ToolOutcome> {
+    if (!this.cfg().biliChannelEnabled) return 'B站通道未启用（可选功能，默认关闭）。';
+    try {
+      const frame = await this.togetherFrame();
+      let accepts = false;
+      try { accepts = this.host?.modelFacts.accepts('image/png') === true; } catch { accepts = false; }
+      if (accepts) return { text: `[一起看当前画面] ${frame.status.title || ''}`, blobs: [{ bytes: frame.bytes, mime: 'image/png', name: 'together-frame.png', fallbackText: '[一起看画面]' }] };
+      return `已截图：${frame.path}`;
+    } catch (error) {
+      return `截图失败：${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+
+  private async toolBiliTogetherClose(): Promise<string> {
+    this.stopTogetherObserver();
+    await this.together.close();
+    return '一起看已关闭。';
+  }
+
+  private async toolBiliFrames(args: Record<string, unknown>): Promise<string | ToolOutcome> {
+    if (!this.cfg().biliChannelEnabled) return 'B站通道未启用（可选功能，默认关闭）。';
+    const bvid = trimText(args.bvid, 30);
+    if (!bvid) return 'bili_frames 需要 bvid。';
+    const count = Math.max(1, Math.min(4, Number(args.count) || 3));
+    const tmp = mkdtempSync(join(tmpdir(), 'coo-bili-'));
+    try {
+      const shots = await this.bili.videoShots(bvid);
+      const response = await fetch(shots.imageUrl, { headers: { 'user-agent': 'Mozilla/5.0', referer: 'https://www.bilibili.com/' } });
+      if (!response.ok) return `缩略图网格下载失败：HTTP ${response.status}`;
+      const input = join(tmp, `${bvid}-sprite.jpg`);
+      writeFileSync(input, new Uint8Array(await response.arrayBuffer()));
+      const frames = cropSprite(input, shots.cols, shots.rows, shots.cellW, shots.cellH, count);
+      if (!frames.length) return '没有抽到帧（ffmpeg 不可用，或缩略图网格尺寸异常）。';
+      const dir = join(this.dataDir, 'bili', 'frames');
+      mkdirSync(dir, { recursive: true });
+      const stamp = Date.now();
+      frames.forEach((frame, index) => writeFileSync(join(dir, `${bvid}-${stamp}-${index + 1}.jpg`), frame.bytes));
+      let accepts = false;
+      try { accepts = this.host?.modelFacts.accepts('image/jpeg') === true; } catch { accepts = false; }
+      if (accepts) return { text: `[B站视频 ${bvid}，抽了 ${frames.length} 帧]`, blobs: frames };
+      return `已抽 ${frames.length} 帧，保存到 ${dir}/${bvid}-${stamp}-*.jpg（当前模型不吃图）。`;
+    } catch (error) {
+      return `抽帧失败：${error instanceof Error ? error.message : String(error)}`;
+    } finally {
+      try { rmSync(tmp, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+  }
+
+  private async pollBiliNotices(now: Date): Promise<void> {
+    const cfg = this.cfg();
+    if (!this.host || !cfg.biliChannelEnabled || !cfg.biliInboxPushEnabled || this.biliNoticeInFlight) return;
+    const every = Math.max(1, Math.min(60, Number(cfg.biliInboxPollMinutes) || 3)) * 60_000;
+    const stateFile = join(this.dataDir, 'bili', 'notices-state.json');
+    let state: { at?: string; inboxSeen?: string[]; dmSeen?: Record<string, number> } = {};
+    try { if (existsSync(stateFile)) state = JSON.parse(readFileSync(stateFile, 'utf8')) as typeof state; } catch { /* ignore */ }
+    const lastAt = Date.parse(String(state.at || '')) || 0;
+    if (Number.isFinite(lastAt) && now.getTime() - lastAt < every) return;
+    this.biliNoticeInFlight = true;
+    const seenInbox = new Set(Array.isArray(state.inboxSeen) ? state.inboxSeen : []);
+    const dmSeen = { ...(state.dmSeen || {}) };
+    try {
+      const push = (type: string, text: string, meta: Record<string, unknown>) => {
+        void this.host?.pushEvent({
+          type, ts: new Date().toISOString(), source: 'bilibili', origin: 'external', senderKey: 'bili.inbox',
+          text, meta: { ...meta, kind: 'bili.notice' },
+        }, { trigger: 'debounce' }).catch((error) => {
+          this.host?.log.warn('[companion] B站通知投递失败', String(error));
+        });
+      };
+      const inbox = await this.bili.inbox(20).catch(() => []);
+      for (const item of inbox) {
+        const key = `${item.kind}:${item.when}:${item.text}:${item.title || ''}`;
+        if (seenInbox.has(key)) continue;
+        const watched = item.bvid || item.title ? this.biliWatch.find({ bvid: item.bvid, title: item.title }) : null;
+        const label = item.kind === 'at' ? '@了我' : '回复了我';
+        const link = item.link || (item.bvid ? `https://www.bilibili.com/video/${item.bvid}` : '');
+        const text = `[B站${label}] ${item.who}${item.title ? `《${item.title}》` : ''}\n${item.text}${link ? `\n${link}` : ''}${item.rpid ? `\n（评论 rpid=${item.rpid}，root=${item.root || item.rpid}，parent=${item.parent || item.rpid}；直接回复用 bili_comment_reply bvid=${item.bvid || ''} root=${item.root || item.rpid} parent=${item.parent || item.rpid}）` : ''}${watched ? `\n（看过：${watched.at.slice(0, 10)} ${watched.bvid}《${watched.title}》）` : ''}`;
+        push('bili.inbox', text, { itemKind: item.kind, bvid: item.bvid || '', title: item.title || '', who: item.who });
+        seenInbox.add(key);
+      }
+      const sessions = await this.bili.dmSessions(10).catch(() => []);
+      for (const session of sessions) {
+        const previous = Number(dmSeen[String(session.talkerId)] || 0);
+        if (session.unread <= 0 && session.lastAt <= previous) continue;
+        const messages = await this.bili.dmMessages(session.talkerId, 20).catch(() => []);
+        const incoming = messages.filter((message) => !message.mine && message.at > previous).slice(-Math.max(1, Math.min(5, session.unread || 3)));
+        for (const message of incoming) {
+          const watched = message.bvid || message.title ? this.biliWatch.find({ bvid: message.bvid, title: message.title }) : null;
+          let text: string;
+          if (message.kind === 'share-video') {
+            const link = message.bvid ? `https://www.bilibili.com/video/${message.bvid}` : '';
+            text = `[B站私信 · talker_id=${session.talkerId}] ${session.name} 分享了视频《${message.title || message.text}》${message.author ? `（UP：${message.author}）` : ''}${link ? `\n${link}` : ''}${watched ? `\n（看过：${watched.at.slice(0, 10)} ${watched.bvid}《${watched.title}》；要重看带 force:true）` : ''}`;
+          } else {
+            text = `[B站私信 · talker_id=${session.talkerId}] ${session.name}：${message.text}`;
+          }
+          push('bili.dm', text, { talkerId: session.talkerId, at: message.at, kind: message.kind, bvid: message.bvid || '' });
+          dmSeen[String(session.talkerId)] = Math.max(previous, message.at);
+        }
+      }
+      try {
+        mkdirSync(join(this.dataDir, 'bili'), { recursive: true });
+        writeFileSync(stateFile, JSON.stringify({ at: now.toISOString(), inboxSeen: [...seenInbox].slice(-300), dmSeen }), 'utf8');
+      } catch { /* ignore */ }
+      this.save(false);
+    } catch (error) {
+      this.host?.log.warn('[companion] B站通知轮询失败', String(error));
+    } finally {
+      this.biliNoticeInFlight = false;
+    }
+  }
+
+  private biliSelfWatchConfig(): { enabled: boolean; everyMinutes: number; topics: string } {
+    const cfg = this.cfg();
+    const file = join(this.dataDir, 'bili', 'selfwatch-config.json');
+    try {
+      if (existsSync(file)) {
+        const local = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
+        return {
+          enabled: local.enabled === true,
+          everyMinutes: Math.max(30, Math.min(1440, Number(local.everyMinutes) || cfg.biliSelfWatchEveryMinutes || 180)),
+          topics: String(local.topics ?? cfg.biliSelfWatchTopics ?? ''),
+        };
+      }
+    } catch { /* fall through */ }
+    return { enabled: cfg.biliSelfWatchEnabled === true, everyMinutes: cfg.biliSelfWatchEveryMinutes || 180, topics: cfg.biliSelfWatchTopics || '' };
+  }
+
+  private async maybeBiliSelfWatch(now: Date): Promise<void> {
+    const cfg = this.cfg();
+    const selfWatch = this.biliSelfWatchConfig();
+    if (!this.host || !cfg.biliChannelEnabled || !selfWatch.enabled || this.biliSelfWatchInFlight) return;
+    if (this.state.sleeping) return;
+    const every = Math.max(30, Math.min(1440, selfWatch.everyMinutes)) * 60_000;
+    const stateFile = join(this.dataDir, 'bili', 'self-watch-state.json');
+    let lastAt = 0;
+    let lastBvid = '';
+    try {
+      if (existsSync(stateFile)) {
+        const saved = JSON.parse(readFileSync(stateFile, 'utf8')) as Record<string, unknown>;
+        lastAt = Date.parse(String(saved.lastAt || '')) || 0;
+        lastBvid = String(saved.bvid || '');
+      }
+    } catch { /* ignore */ }
+    if (Number.isFinite(lastAt) && now.getTime() - lastAt < every) return;
+    this.biliSelfWatchInFlight = true;
+    try {
+      const history = await this.bili.history(10).catch(() => []);
+      let candidate = history.find((item) => item.bvid !== lastBvid && !this.biliWatch.find({ bvid: item.bvid, title: item.title })) || null;
+      if (!candidate && selfWatch.topics.trim()) {
+        const hits = await this.bili.search(selfWatch.topics.trim(), 8).catch(() => []);
+        const hit = hits.find((item) => item.bvid !== lastBvid && !this.biliWatch.find({ bvid: item.bvid, title: item.title }));
+        if (hit) candidate = { bvid: hit.bvid, title: hit.title, author: hit.owner, progress: 0, duration: hit.duration, at: now.toISOString() };
+      }
+      if (!candidate) return;
+      const result = await this.toolBiliWatch({ bvid: candidate.bvid, note: '' });
+      try {
+        mkdirSync(join(this.dataDir, 'bili'), { recursive: true });
+        writeFileSync(stateFile, JSON.stringify({ lastAt: now.toISOString(), bvid: candidate.bvid, title: candidate.title }), 'utf8');
+      } catch { /* ignore */ }
+      this.mind('action', `自己看：${candidate.title}`, { bvid: candidate.bvid, result: result.slice(0, 120) });
+      this.save(false);
+    } catch (error) {
+      this.host?.log.warn('[companion] B站自己看失败', String(error));
+    } finally {
+      this.biliSelfWatchInFlight = false;
+    }
+  }
+
+  private async toolBiliWatch(args: Record<string, unknown>): Promise<string> {
+    if (!this.cfg().biliChannelEnabled) return 'B站通道未启用（可选功能，默认关闭）。';
+    const bvid = trimText(args.bvid, 30);
+    if (!bvid) return 'bili_watch 需要 bvid。';
+    const info = await this.bili.info(bvid);
+    const previous = this.biliWatch.find({ bvid, title: info.title });
+    if (previous && args.force !== true) {
+      return `这条看过了：${previous.at.slice(0, 10)} 看过 ${previous.bvid}《${previous.title}》；要看就带 force:true。`;
+    }
+    const subtitles = await this.bili.subtitles(bvid).catch(() => []);
+    const comments = await this.bili.comments(bvid, 5).catch(() => []);
+    const note = trimText(args.note, 300);
+    const excerpt = subtitles.slice(0, 80).map((line) => line.text).join(' ').slice(0, 1200);
+    const hot = comments.slice(0, 3).map((comment) => `${comment.user}：${comment.message}`).join(' / ');
+    const summary = `看了 ${info.title}（UP：${info.owner}）。${excerpt ? `字幕摘录：${excerpt}` : ''}${hot ? `热评：${hot}` : ''}${note ? ` 她的感受：${note}` : ''}`;
+    this.biliWatch.record({ at: new Date().toISOString(), bvid, title: info.title, owner: info.owner, duration: info.duration, via: 'tool' });
+    if (this.cfg().memoryEnabled && this.cfg().memoryCapture) {
+      this.memoryStore.add({ text: summary, kind: 'episode', scope: `bili:${bvid}`, source: 'bili', tags: ['bili', 'watch'], importance: 0.55 });
+    }
+    void this.host?.pushEvent({
+      type: 'bili.watch', ts: new Date().toISOString(), source: 'bilibili', origin: 'external', senderKey: 'bili.self',
+      text: `[B站自己看] ${summary}`,
+      meta: { kind: 'bili.watch', bvid, title: info.title, via: 'tool' },
+    }, { trigger: 'debounce' }).catch((error) => {
+      this.host?.log.warn('[companion] B站观看事件投递失败', String(error));
+    });
+    return `已记下这次观看：${info.title}。${note ? `感受：${note}` : ''}`;
+  }
+
+  private async toolBiliFrames(args: Record<string, unknown>): Promise<string | ToolOutcome> {
+    if (!this.cfg().biliChannelEnabled) return 'B站通道未启用（可选功能，默认关闭）。';
+    const bvid = trimText(args.bvid, 30);
+    if (!bvid) return 'bili_frames 需要 bvid。';
+    const count = Math.max(1, Math.min(4, Number(args.count) || 3));
+    const tmp = mkdtempSync(join(tmpdir(), 'coo-bili-'));
+    try {
+      const shots = await this.bili.videoShots(bvid);
+      const response = await fetch(shots.imageUrl, { headers: { 'user-agent': 'Mozilla/5.0', referer: 'https://www.bilibili.com/' } });
+      if (!response.ok) return `缩略图网格下载失败：HTTP ${response.status}`;
+      const input = join(tmp, `${bvid}-sprite.jpg`);
+      writeFileSync(input, new Uint8Array(await response.arrayBuffer()));
+      const frames = cropSprite(input, shots.cols, shots.rows, shots.cellW, shots.cellH, count);
+      if (!frames.length) return '没有抽到帧（ffmpeg 不可用，或缩略图网格尺寸异常）。';
+      const dir = join(this.dataDir, 'bili', 'frames');
+      mkdirSync(dir, { recursive: true });
+      const stamp = Date.now();
+      frames.forEach((frame, index) => writeFileSync(join(dir, `${bvid}-${stamp}-${index + 1}.jpg`), frame.bytes));
+      let accepts = false;
+      try { accepts = this.host?.modelFacts.accepts('image/jpeg') === true; } catch { accepts = false; }
+      if (accepts) return { text: `[B站视频 ${bvid}，抽了 ${frames.length} 帧]`, blobs: frames };
+      return `已抽 ${frames.length} 帧，保存到 ${dir}/${bvid}-${stamp}-*.jpg（当前模型不吃图）。`;
+    } catch (error) {
+      return `抽帧失败：${error instanceof Error ? error.message : String(error)}`;
+    } finally {
+      try { rmSync(tmp, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+  }
+
+  private biliSelfWatchConfig(): { enabled: boolean; everyMinutes: number; topics: string } {
+    const cfg = this.cfg();
+    const file = join(this.dataDir, 'bili', 'selfwatch-config.json');
+    try {
+      if (existsSync(file)) {
+        const local = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
+        return {
+          enabled: local.enabled === true,
+          everyMinutes: Math.max(30, Math.min(1440, Number(local.everyMinutes) || cfg.biliSelfWatchEveryMinutes || 180)),
+          topics: String(local.topics ?? cfg.biliSelfWatchTopics ?? ''),
+        };
+      }
+    } catch { /* fall through */ }
+    return { enabled: cfg.biliSelfWatchEnabled === true, everyMinutes: cfg.biliSelfWatchEveryMinutes || 180, topics: cfg.biliSelfWatchTopics || '' };
+  }
+
+  private async maybeBiliSelfWatch(now: Date): Promise<void> {
+    const cfg = this.cfg();
+    const selfWatch = this.biliSelfWatchConfig();
+    if (!this.host || !cfg.biliChannelEnabled || !selfWatch.enabled || this.biliSelfWatchInFlight) return;
+    if (this.state.sleeping) return;
+    const every = Math.max(30, Math.min(1440, selfWatch.everyMinutes)) * 60_000;
+    const stateFile = join(this.dataDir, 'bili', 'self-watch-state.json');
+    let lastAt = 0;
+    let lastBvid = '';
+    try {
+      if (existsSync(stateFile)) {
+        const saved = JSON.parse(readFileSync(stateFile, 'utf8')) as Record<string, unknown>;
+        lastAt = Date.parse(String(saved.lastAt || '')) || 0;
+        lastBvid = String(saved.bvid || '');
+      }
+    } catch { /* ignore */ }
+    if (Number.isFinite(lastAt) && now.getTime() - lastAt < every) return;
+    this.biliSelfWatchInFlight = true;
+    try {
+      const history = await this.bili.history(10).catch(() => []);
+      let candidate = history.find((item) => item.bvid !== lastBvid && !this.biliWatch.find({ bvid: item.bvid, title: item.title })) || null;
+      if (!candidate && selfWatch.topics.trim()) {
+        const hits = await this.bili.search(selfWatch.topics.trim(), 8).catch(() => []);
+        const hit = hits.find((item) => item.bvid !== lastBvid && !this.biliWatch.find({ bvid: item.bvid, title: item.title }));
+        if (hit) candidate = { bvid: hit.bvid, title: hit.title, author: hit.owner, progress: 0, duration: hit.duration, at: now.toISOString() };
+      }
+      if (!candidate) return;
+      const result = await this.toolBiliWatch({ bvid: candidate.bvid, note: '' });
+      try {
+        mkdirSync(join(this.dataDir, 'bili'), { recursive: true });
+        writeFileSync(stateFile, JSON.stringify({ lastAt: now.toISOString(), bvid: candidate.bvid, title: candidate.title }), 'utf8');
+      } catch { /* ignore */ }
+      this.mind('action', `自己看：${candidate.title}`, { bvid: candidate.bvid, result: result.slice(0, 120) });
+      this.save(false);
+    } catch (error) {
+      this.host?.log.warn('[companion] B站自己看失败', String(error));
+    } finally {
+      this.biliSelfWatchInFlight = false;
+    }
+  }
+
+  private async toolBiliWatch(args: Record<string, unknown>): Promise<string> {
+    if (!this.cfg().biliChannelEnabled) return 'B站通道未启用（可选功能，默认关闭）。';
+    const bvid = trimText(args.bvid, 30);
+    if (!bvid) return 'bili_watch 需要 bvid。';
+    const info = await this.bili.info(bvid);
+    const subtitles = await this.bili.subtitles(bvid).catch(() => []);
+    const comments = await this.bili.comments(bvid, 5).catch(() => []);
+    const note = trimText(args.note, 300);
+    const excerpt = subtitles.slice(0, 80).map((line) => line.text).join(' ').slice(0, 1200);
+    const hot = comments.slice(0, 3).map((comment) => `${comment.user}：${comment.message}`).join(' / ');
+    const summary = `看了 ${info.title}（UP：${info.owner}）。${excerpt ? `字幕摘录：${excerpt}` : ''}${hot ? `热评：${hot}` : ''}${note ? ` 她的感受：${note}` : ''}`;
+    const ledgerDir = join(this.dataDir, 'bili');
+    try {
+      mkdirSync(ledgerDir, { recursive: true });
+      appendFileSync(join(ledgerDir, 'watch-ledger.jsonl'), JSON.stringify({ at: new Date().toISOString(), bvid, title: info.title, owner: info.owner, summary }) + '\n', 'utf8');
+    } catch (error) {
+      return `观看记录写盘失败：${error instanceof Error ? error.message : String(error)}`;
+    }
+    if (this.cfg().memoryEnabled && this.cfg().memoryCapture) {
+      this.memoryStore.add({ text: summary, kind: 'episode', scope: `bili:${bvid}`, source: 'bili', tags: ['bili', 'watch'], importance: 0.55 });
+    }
+    return `已记下这次观看：${info.title}。${note ? `感受：${note}` : ''}`;
+  }
+
+  private async toolBiliSubtitles(args: Record<string, unknown>): Promise<string> {
+    if (!this.cfg().biliChannelEnabled) return 'B站通道未启用（可选功能，默认关闭）。';
+    const bvid = trimText(args.bvid, 30);
+    if (!bvid) return 'bili_subtitles 需要 bvid。';
+    const lines = await this.bili.subtitles(bvid);
+    if (!lines.length) return '没有读到字幕（可能需要登录，或这条视频没有 CC/AI 字幕）。';
+    return lines.slice(0, 200).map((line) => `[${Math.floor(line.from)}s] ${line.text}`).join('\n');
+  }
+
+  private async toolBiliHistory(args: Record<string, unknown>): Promise<string> {
+    if (!this.cfg().biliChannelEnabled) return 'B站通道未启用（可选功能，默认关闭）。';
+    const rows = await this.bili.history(Number(args.limit) || 20);
+    if (!rows.length) return '没有读到观看记录（可能需要登录）。';
+    return rows.map((row) => `${row.bvid}｜${row.title}｜${row.author}｜${Math.floor(row.progress / 60)}/${Math.floor(row.duration / 60)} 分钟`).join('\n');
+  }
+
+  private async toolBiliComments(args: Record<string, unknown>): Promise<string> {
+    if (!this.cfg().biliChannelEnabled) return 'B站通道未启用（可选功能，默认关闭）。';
+    const bvid = trimText(args.bvid, 30);
+    if (!bvid) return 'bili_comments 需要 bvid。';
+    const comments = await this.bili.comments(bvid, Number(args.limit) || 8);
+    if (!comments.length) return '没有读到评论。';
+    return comments.map((comment) => `${comment.user}（rpid=${comment.rpid}，${comment.like}赞）：${comment.message.slice(0, 160)}`).join('\n');
+  }
+
+  private async toolQqStatus(): Promise<string> {
+    const s = this.oneBot.status();
+    if (!this.cfg().qqChannelEnabled) return 'QQ 通道未启用（可选功能，默认关闭）。';
+    const state = s.state === 'online' ? '已连接' : s.state === 'disabled' ? '未启用' : s.state === 'connecting' ? '连接中' : s.state === 'error' ? '出错' : '未连接';
+    return [
+      `QQ：${state}`,
+      `地址：${s.wsUrl}`,
+      s.selfId ? `账号：${s.selfId}` : '',
+      s.appName ? `实现：${s.appName}${s.appVersion ? ` ${s.appVersion}` : ''}` : '',
+      `事件：${s.eventCount}`,
+      s.lastError ? `错误：${s.lastError}` : '',
+    ].filter(Boolean).join('；');
+  }
+
+  private async toolQqRecent(args: Record<string, unknown>): Promise<string> {
+    const limit = Math.max(1, Math.min(20, Number(args.limit) || 8));
+    const messages = this.oneBot.recentMessages(limit);
+    if (!messages.length) return '最近没有收到 QQ 消息。';
+    return messages.map((message) => {
+      const kind = message.messageType === 'group' ? '群' : '私聊';
+      const imageInfo = message.imageKeys.map((key) => {
+        const record = this.oneBot.mediaGet(key);
+        return record?.meaning ? `${key.slice(0, 8)}=${record.meaning}` : key.slice(0, 8);
+      }).join(', ');
+      const images = imageInfo ? `（图 ${imageInfo}）` : '';
+      const quote = message.quote ? `[引用 ${message.quote}] ` : '';
+      const files = message.filePaths?.length ? `（文件 ${message.filePaths.length}）` : '';
+      const voices = message.voicePaths?.length ? `（语音 ${message.voicePaths.length}）` : '';
+      return `[${formatLocal(message.at, this.tz()).slice(5, 16)}] [${message.messageId}] ${kind} ${message.nickname}：${quote}${message.text || '[空消息]'}${images}${files}${voices}`;
+    }).join('\n');
+  }
+
+  private async toolCompanionScreen(): Promise<string | ToolOutcome> {
+    if (!this.cfg().screenEnabled) return '看屏幕没有开启（worlds.companion.screenEnabled=false）。';
+    const dir = join(this.dataDir, 'screen');
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, `screen-${Date.now()}.png`);
+    const escaped = path.replace(/'/g, "''");
+    const script = [
+      'Add-Type -AssemblyName System.Windows.Forms,System.Drawing',
+      '$b=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds',
+      '$bmp=New-Object System.Drawing.Bitmap $b.Width,$b.Height',
+      '$g=[System.Drawing.Graphics]::FromImage($bmp)',
+      '$g.CopyFromScreen($b.Location,[System.Drawing.Point]::Empty,$b.Size)',
+      `$bmp.Save('${escaped}',[System.Drawing.Imaging.ImageFormat]::Png)`,
+      '$g.Dispose(); $bmp.Dispose()',
+    ].join('; ');
+    const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { timeout: 20_000, windowsHide: true });
+    if (result.status !== 0 || !existsSync(path)) return '截屏失败（PowerShell 不可用或桌面会话受限）。';
+    const bytes = readFileSync(path);
+    let accepts = false;
+    try { accepts = this.host?.modelFacts.accepts('image/png') === true; } catch { accepts = false; }
+    if (accepts) return { text: `[当前屏幕] ${path}`, blobs: [{ bytes, mime: 'image/png', name: 'screen.png', fallbackText: '[屏幕截图]' }] };
+    return `已截屏：${path}`;
+  }
+
+  private async toolOneBotActions(args: Record<string, unknown>): Promise<string> {
+    const actions = searchOneBotActions(trimText(args.query, 80), Number(args.limit) || 12);
+    if (!actions.length) return '目录里没有匹配的 action。';
+    return actions.map((action) => {
+      const params = (action.params ?? []).map((param) => `${param.name}${param.required ? '*' : ''}`).join(', ');
+      return `${action.name}${action.readOnly ? ' [只读]' : ''}：${action.summary || ''}${params ? `；参数：${params}` : ''}`;
+    }).join('\n');
+  }
+
+  private async toolOneBotCall(args: Record<string, unknown>): Promise<string> {
+    if (!this.cfg().qqChannelEnabled) return 'QQ 通道未启用（可选功能，默认关闭）。';
+    const name = trimText(args.action, 80);
+    if (!name) return 'onebot_call 需要 action。';
+    if (BLOCKED_ACTIONS.has(name)) return `action ${name} 被安全策略禁用。`;
+    const action = findOneBotAction(name);
+    if (!action) return `目录里没有 action ${name}；先 onebot_actions 搜一下。`;
+    if (!action.readOnly && args.confirm !== true) {
+      return `action ${action.name} 会改外部状态，需要 confirm=true 才执行。`;
+    }
+    const params = args.params && typeof args.params === 'object' && !Array.isArray(args.params)
+      ? args.params as Record<string, unknown> : {};
+    const errors = validateActionParams(action, params);
+    if (errors.length) return `参数不对：${errors.join('；')}`;
+    try {
+      const result = await this.oneBot.call(action.name, params);
+      return `action ${action.name} 成功：${JSON.stringify(result).slice(0, 4000)}`;
+    } catch (error) {
+      return `action ${action.name} 失败：${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+
+  private async toolOneBotReceive(args: Record<string, unknown>): Promise<string> {
+    if (typeof args.receive === 'string') {
+      const receive = args.receive.trim() || 'private:*';
+      this.oneBot.saveConfig({ receive });
+      return `QQ 接收策略已改为：${receive}`;
+    }
+    return `当前接收策略：${this.oneBot.receiveText()}`;
+  }
+
+  private async toolQqReply(args: Record<string, unknown>): Promise<string> {
+    if (!this.cfg().qqChannelEnabled) return 'QQ 通道未启用（可选功能，默认关闭）。';
+    const messageId = trimText(args.message_id, 80);
+    const text = trimText(args.text, 1000);
+    if (!messageId || !text) return 'qq_reply 需要 message_id 和 text。';
+    try {
+      await this.oneBot.reply(messageId, text);
+      return `已引用回复 ${messageId}。`;
+    } catch (error) {
+      return `回复失败：${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+
+  private async toolQqViewFile(args: Record<string, unknown>): Promise<string | ToolOutcome> {
+    const key = trimText(args.key, 300);
+    if (!key) return 'qq_view_file 需要 key。';
+    const record = this.oneBot.mediaGet(key);
+    if (!record) return '没有找到这个文件。';
+    const bytes = this.oneBot.mediaRead(record);
+    if (!bytes) return '文件不在了。';
+    if (record.mime.startsWith('text/')) {
+      return `文件 ${record.hash.slice(0, 8)}（${record.mime}）：\n${Buffer.from(bytes).toString('utf8').slice(0, 4000)}`;
+    }
+    if (record.mime.startsWith('audio/')) {
+      let accepts = false;
+      try { accepts = this.host?.modelFacts.accepts(record.mime) === true; } catch { accepts = false; }
+      if (accepts) {
+        return { text: `[语音 ${record.hash.slice(0, 8)}]`, blobs: [{ bytes, mime: record.mime, name: `qq-audio-${record.hash.slice(0, 8)}.audio`, fallbackText: '[语音]' }] };
+      }
+      return `语音已保存：${record.path}（${record.mime}，${record.size} 字节）。可以用 qq_transcribe_voice 转写。`;
+    }
+    return `文件已保存：${record.path}（${record.mime}，${record.size} 字节）。`;
+  }
+
+  private async toolQqTranscribeVoice(args: Record<string, unknown>): Promise<string> {
+    const key = trimText(args.key, 300);
+    if (!key) return 'qq_transcribe_voice 需要 key。';
+    const record = this.oneBot.mediaGet(key);
+    if (!record) return '没有找到这条语音。';
+    if (!record.mime.startsWith('audio/')) return '这不是 audio 文件。';
+    const template = this.oneBot.sttCommand();
+    if (!template) {
+      const local = await this.voice.transcribe(record.path);
+      if (local.error) return `本机转写失败：${local.error}`;
+      return local.text ? `转写：${local.text}` : '没有识别出文字。';
+    }
+    const quoted = `"${record.path.replace(/"/g, '\\"')}"`;
+    const command = template.includes('{file}') ? template.replaceAll('{file}', quoted) : `${template} ${quoted}`;
+    const result = spawnSync(command, { shell: true, timeout: 120_000, encoding: 'utf8', windowsHide: true });
+    if (result.error) return `转写失败：${result.error.message}`;
+    const stdout = String(result.stdout || '').trim();
+    const stderr = String(result.stderr || '').trim();
+    if (result.status !== 0) return `转写失败（${result.status}）：${(stderr || stdout).slice(0, 1000)}`;
+    return stdout ? `转写：${stdout.slice(0, 4000)}` : '转写命令没有输出。';
+  }
+
+  private async toolQqViewImage(args: Record<string, unknown>): Promise<string | ToolOutcome> {
+    if (!this.cfg().qqChannelEnabled) return 'QQ 通道未启用（可选功能，默认关闭）。';
+    const key = trimText(args.key, 300);
+    if (!key) return 'qq_view_image 需要 key。';
+    const record = this.oneBot.mediaGet(key);
+    if (!record) return '没有找到这张图；先用 qq_recent 看图片短号。';
+    if (record.meaning) return `这张图已经有含义：${record.meaning}。不再返回图片，直接按这个意思用。`;
+    if (record.viewedAt) return '这张图之前已经看过但还没记含义；不再重复给图，请用 qq_media_note 补一句，或者跳过。';
+    const bytes = this.oneBot.mediaRead(record);
+    if (!bytes) return '图片文件不在了；可以重新下载后再看。';
+    this.oneBot.mediaMarkViewed(record);
+    this.oneBot.mediaMarkSeen(record);
+    const fallback = `[图片 ${record.hash.slice(0, 8)}]`;
+    if (record.mime === 'image/gif') {
+      const frames = gifFrames(record.path, 4);
+      if (frames.length) {
+        return {
+          text: `[动图 ${record.hash.slice(0, 8)}，已抽 ${frames.length} 帧。看完用 qq_media_note 记一句含义，下次不再看。]`,
+          blobs: frames,
+        };
+      }
+    }
+    return {
+      text: `${fallback} 看完用 qq_media_note 记一句含义，下次不再看。`,
+      blobs: [{ bytes, mime: record.mime, name: `qq-image-${record.hash.slice(0, 8)}.${record.mime.split('/')[1] || 'img'}`, fallbackText: fallback }],
+    };
+  }
+
+  private async toolQqMediaList(args: Record<string, unknown>): Promise<string> {
+    const list = this.oneBot.mediaList(Math.max(1, Math.min(30, Number(args.limit) || 10)));
+    if (!list.length) return '还没有下载过 QQ 图片。';
+    return list.map((item) => `${item.hash.slice(0, 8)}${item.meaning ? `｜${item.meaning}` : ''}｜${item.path}`).join('\n');
+  }
+
+  private async toolQqMediaNote(args: Record<string, unknown>): Promise<string> {
+    const key = trimText(args.key, 200);
+    const meaning = trimText(args.meaning, 200);
+    if (!key || !meaning) return 'qq_media_note 需要 key 和 meaning。';
+    const record = this.oneBot.mediaNote(key, meaning);
+    return record ? `已记下 ${record.hash.slice(0, 8)}：${record.meaning}` : '没有找到这张图。';
+  }
+
+  private async toolQqSend(args: Record<string, unknown>): Promise<string> {
+    if (!this.cfg().qqChannelEnabled) return 'QQ 通道未启用（可选功能，默认关闭）。';
+    const targetType = args.target_type === 'group' ? 'group' : 'private';
+    const targetId = trimText(args.target_id, 30);
+    const text = trimText(args.text, 1000);
+    if (!targetId || !text) return 'qq_send 需要 target_id 和 text。';
+    try {
+      if (targetType === 'group') await this.oneBot.sendGroup(targetId, text);
+      else await this.oneBot.sendPrivate(targetId, text);
+      return `已发送到${targetType === 'group' ? '群' : 'QQ'} ${targetId}。`;
+    } catch (error) {
+      return `发送失败：${error instanceof Error ? error.message : String(error)}`;
+    }
   }
 
   private async toolState(args: Record<string, unknown>): Promise<string> {
@@ -2075,7 +3778,7 @@ export class CompanionWorld implements World {
 
   /** 进上下文的记忆摘要：规则 + 人物 + 今天 + 情绪回声 + 最近几条。 */
   private memoryDigest(): {
-    rules: string[]; person?: string; working?: string; echo?: string;
+    rules: string[]; person?: string; model?: string; working?: string; echo?: string;
     echoId?: string; echoEventId?: string; recent: string[];
     followup?: string;
   } {
@@ -2086,6 +3789,8 @@ export class CompanionWorld implements World {
     const todayStart = startOfLocalDayMs(now, this.tz());
     const rules = this.memoryStore.rules(cfg.memoryNotesInPrompt);
     const person = this.memoryStore.people()[0];
+    // 用户模型：有内容时替代 person 摘要（避免两份画像打架），没有就回退。
+    const model = cfg.userModelInPrompt !== false ? this.userModelText() : '';
     const workingRecords = cfg.workingMemoryInPrompt !== false
       ? this.memoryStore.todayEpisodes(3, scope, todayStart) : [];
     const workingIds = new Set(workingRecords.map((record) => record.id));
@@ -2110,7 +3815,8 @@ export class CompanionWorld implements World {
     return {
       // 规则是硬约束，不截断；单条超过 400 字才做保护性截断。
       rules: rules.map((record) => (record.text.length > 400 ? `${record.text.slice(0, 400)}…` : record.text)),
-      person: person ? `他：${person.text.slice(0, 180)}` : undefined,
+      person: model ? undefined : (person ? `他：${person.text.slice(0, 180)}` : undefined),
+      model: model || undefined,
       working: working || undefined,
       echo: echo?.text,
       echoId: echo?.id,
@@ -2118,6 +3824,28 @@ export class CompanionWorld implements World {
       ...(followup ? { followup } : {}),
       recent: recent.map((record) => `${formatLocal(record.ts, this.tz()).slice(0, 10)} ${record.text.slice(0, 120)}`),
     };
+  }
+
+  /** 「我对他的理解」：10 分钟或记录数变化时重算；推导失败不阻塞上下文。 */
+  private userModelText(): string {
+    const now = Date.now();
+    const count = this.memoryStore.stats().records;
+    if (this.userModelCache && now - this.userModelCache.at < 10 * 60_000
+      && this.userModelCache.records === count) {
+      return this.userModelCache.text;
+    }
+    let text = '';
+    try {
+      text = renderUserModel(deriveUserModel({
+        records: this.memoryStore.entries(),
+        now: new Date(now),
+        tz: this.tz(),
+      }));
+    } catch {
+      text = '';
+    }
+    this.userModelCache = { at: now, records: count, text };
+    return text;
   }
 
   /** 情绪回声：只看最近 30 分钟最后一条人话，同一事件只算一次；标记在推送成功后做。 */

@@ -19,7 +19,10 @@ export interface ContextInput {
   cfg: CompanionConfig;
   tz: string;
   now: Date;
-  memory?: { rules: string[]; person?: string; working?: string; echo?: string; recent: string[]; followup?: string };
+  memory?: {
+    rules: string[]; person?: string; model?: string; working?: string; echo?: string;
+    recent: string[]; followup?: string;
+  };
 }
 
 export function buildContextText(input: ContextInput): string {
@@ -35,7 +38,8 @@ export function buildContextText(input: ContextInput): string {
   if (rel) lines.push(`关系：${rel}`);
   if (input.memory) {
     if (input.memory.rules.length) lines.push(`规则（必须遵守）：${input.memory.rules.join('；')}`);
-    if (input.memory.person) lines.push(input.memory.person);
+    if (input.memory.model) lines.push(input.memory.model);
+    else if (input.memory.person) lines.push(input.memory.person);
     if (input.memory.working) lines.push(`今天：${input.memory.working}`);
     if (input.memory.echo) lines.push(`情绪回声（只是提示，不一定说）：${input.memory.echo}`);
     if (input.memory.followup) lines.push(`待复核话头（判断完成/取消/更新，不要重复追问）：${input.memory.followup}`);
@@ -67,6 +71,7 @@ export function contextSignature(input: ContextInput): string {
     input.journal.length ? input.journal[input.journal.length - 1].text.slice(0, 60) : '',
     input.memory?.rules.join('|') ?? '',
     input.memory?.person ?? '',
+    input.memory?.model ?? '',
     input.memory?.working ?? '',
     input.memory?.echo ?? '',
     input.memory?.recent.join('|') ?? '',

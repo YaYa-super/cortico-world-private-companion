@@ -5,6 +5,44 @@
 
 export interface CompanionConfig {
   enabled: boolean;
+  /** 面板里显示的自定义称呼；空 = 默认大肥鱼。 */
+  displayName: string;
+  /** 可选 QQ（OneBot）通道；默认关闭。 */
+  qqChannelEnabled: boolean;
+  /** 可选 B站只读通道；默认关闭。 */
+  biliChannelEnabled: boolean;
+  /** 兼容旧 onebot_* 工具名；默认关闭，避免和已装旧 OneBot 扩展撞名。 */
+  qqLegacyTools: boolean;
+  /** B站 Cookie 文件；空 = 尝试读旧陪看扩展的 cookies.json。 */
+  biliCookieFile: string;
+  /** B站通知：把 @我 / 回复 / 私信直接推给主 session，不让模型自己轮询工具。 */
+  biliInboxPushEnabled: boolean;
+  biliInboxPollMinutes: number;
+  /** 一起看使用的 Edge 路径；空用默认 Edge。 */
+  biliBrowserPath: string;
+  /** 可选：允许角色发 B站评论/私信（默认关闭）。 */
+  biliReplyEnabled: boolean;
+  /** 可选：允许角色点赞/投币/收藏/关注等账号动作。 */
+  biliInteractEnabled: boolean;
+  /** 评论时 @ 的主人 UID。 */
+  biliOwnerUid: string;
+  biliDailyComments: number;
+  /** 原生 QQ：自动转写收到的语音。 */
+  qqTranscribeVoice: boolean;
+  deepseekBaseUrl: string;
+  deepseekKeyFile: string;
+  /** 可选：允许角色截屏看桌面（默认关闭）。 */
+  screenEnabled: boolean;
+  /** B站自己看：定时从观看记录/主题里挑一条看并记下。 */
+  biliSelfWatchEnabled: boolean;
+  biliSelfWatchEveryMinutes: number;
+  biliSelfWatchTopics: string;
+  /** 一起看采样间隔（秒）。 */
+  biliCaptureIntervalSec: number;
+  /** 一起看观察图集间隔（秒）。 */
+  biliObserveIntervalSec: number;
+  /** 单张观察图集最多几格。 */
+  biliObserveCells: number;
   /** 主动联系总开关。 */
   proactiveEnabled: boolean;
   /** @deprecated 旧计时器参数，保留兼容，不再使用。 */
@@ -13,6 +51,10 @@ export interface CompanionConfig {
   proactiveJitterMin: number;
   /** 每天主动上限（0 = 不限制，不建议）。 */
   proactiveDailyCap: number;
+  /** 开口决策：gate 旧闸门；shadow 只记效用不改行为；utility 用效用模型。 */
+  proactiveDecision: '综合判断' | '只记录' | '固定阈值' | 'gate' | 'shadow' | 'utility';
+  /** 黏人度 0-2：1 中性，越大越愿意开口（只放大由头值，不动打扰成本）。 */
+  proactiveClinginess: number;
   /** 对方刚说过话后的静默窗口（分钟），窗口内不主动。 */
   idleGateMin: number;
   /** 免打扰开始（含）。 */
@@ -37,6 +79,8 @@ export interface CompanionConfig {
   memoryRetentionDays: number;
   /** 常驻笔记进提示词的条数。 */
   memoryNotesInPrompt: number;
+  /** 是否把「我对他的理解」注入上下文（有内容时替代 person 摘要）。 */
+  userModelInPrompt: boolean;
   /** 是否把“今天聊过什么”放进上下文。 */
   workingMemoryInPrompt: boolean;
   /** 是否在对方有明显情绪时提示“上次同类情绪的原因”。 */
@@ -75,10 +119,34 @@ export interface CompanionConfig {
 
 export const COMPANION_DEFAULTS: CompanionConfig = {
   enabled: false,
+  displayName: '大肥鱼',
+  qqChannelEnabled: false,
+  biliChannelEnabled: false,
+  qqLegacyTools: false,
+  biliCookieFile: '',
+  biliInboxPushEnabled: true,
+  biliInboxPollMinutes: 3,
+  biliBrowserPath: '',
+  biliReplyEnabled: false,
+  biliInteractEnabled: true,
+  biliOwnerUid: '',
+  biliDailyComments: 3,
+  qqTranscribeVoice: true,
+  deepseekBaseUrl: 'https://api.deepseek.com',
+  deepseekKeyFile: '',
+  screenEnabled: false,
+  biliSelfWatchEnabled: false,
+  biliSelfWatchEveryMinutes: 180,
+  biliSelfWatchTopics: '',
+  biliCaptureIntervalSec: 0.8,
+  biliObserveIntervalSec: 5,
+  biliObserveCells: 4,
   proactiveEnabled: true,
   proactiveMinGapMin: 90,
   proactiveJitterMin: 12,
   proactiveDailyCap: 4,
+  proactiveDecision: '综合判断',
+  proactiveClinginess: 1.3,
   idleGateMin: 15,
   quietStart: '23:00',
   quietEnd: '08:30',
@@ -91,6 +159,7 @@ export const COMPANION_DEFAULTS: CompanionConfig = {
   memoryCapture: true,
   memoryRetentionDays: 45,
   memoryNotesInPrompt: 6,
+  userModelInPrompt: true,
   workingMemoryInPrompt: true,
   emotionEchoEnabled: true,
   musingEnabled: true,
@@ -134,27 +203,160 @@ export const COMPANION_CONFIG_GROUP: CompanionConfigGroup = {
   schema: {
     type: 'object',
     title: '我会永远陪着你',
-    description: '生活感与主动联系的分寸。内置可迁移记忆（companion-memory/2，支持导入导出与隔离审核）。设计参考 menglimi 的 AstrBot 插件 astrbot_plugin_private_companion（同名「我会永远陪着你」）。改完即时生效（世界启停本身需要重启进程）。',
+    description: '为角色提供生活节奏、长期记忆与主动联系。配置大多即时生效；世界启停需要重启应用。',
     properties: {
+      'worlds.companion.displayName': {
+        type: 'string',
+        title: '角色称呼',
+        description: '角色在面板标题和互动中的显示称呼。默认「大肥鱼」，可按自己的设定修改。',
+        'x-hot': true,
+      },
+      'worlds.companion.qqChannelEnabled': {
+        type: 'boolean',
+        title: 'QQ 通道（可选）',
+        description: '启用后显示 QQ 面板，并由本扩展直接连接 OneBot。默认关闭，避免与已安装的 QQ 扩展重复连接。',
+        'x-hot': true,
+      },
+      'worlds.companion.biliChannelEnabled': {
+        type: 'boolean',
+        title: 'B站通道（可选）',
+        description: '启用后显示 B站面板，包含浏览、通知、账号与一起看。默认关闭，避免与已有的 B站扩展冲突。',
+        'x-hot': true,
+      },
+      'worlds.companion.biliCookieFile': {
+        type: 'string',
+        title: 'B站 Cookie 文件',
+        description: 'B站登录态文件路径。留空时读取旧陪看扩展的 cookies.json，也可指向自己的 Cookie 文件。',
+        'x-path': { kind: 'file', extensions: ['json'] },
+      },
+      'worlds.companion.biliInboxPushEnabled': {
+        type: 'boolean',
+        title: 'B站 @/私信直接推送',
+        description: '后台定时读取 B站 @、回复和私信，新消息直接交给角色；角色可直接回复评论楼中楼或私信。',
+      },
+      'worlds.companion.biliBrowserPath': {
+        type: 'string',
+        title: '一起看浏览器路径',
+        description: '一起看使用的浏览器程序。留空使用系统 Edge；使用普通窗口，不另起 app 窗口。',
+        'x-path': { kind: 'file', extensions: ['exe'] },
+      },
+      'worlds.companion.biliInboxPollMinutes': {
+        type: 'integer',
+        title: 'B站通知轮询间隔（分钟）',
+        minimum: 1,
+        maximum: 60,
+        description: '后台检查 B站通知的频率。默认 3 分钟；过短会增加请求次数。',
+      },
+      'worlds.companion.biliReplyEnabled': {
+        type: 'boolean',
+        title: '允许 B站评论/私信回复',
+        description: '允许角色发 B站评论和私信。默认关闭；每次发送仍需要明确确认。',
+      },
+      'worlds.companion.biliInteractEnabled': {
+        type: 'boolean',
+        title: '允许 B站账号动作',
+        description: '允许角色执行点赞、投币、收藏、关注等账号动作。默认开启。',
+      },
+      'worlds.companion.biliOwnerUid': {
+        type: 'string',
+        title: 'B站主人 UID',
+        description: '评论时 @ 的账号 UID。留空时尝试从旧陪看配置读取。',
+      },
+      'worlds.companion.biliDailyComments': {
+        type: 'integer',
+        title: 'B站每天评论上限',
+        minimum: 1,
+        maximum: 20,
+        description: '每天最多发几条 B站评论，成功发送才计数。',
+      },
+      'worlds.companion.qqTranscribeVoice': {
+        type: 'boolean',
+        title: '自动转写 QQ 语音',
+        description: '收到 QQ 语音时自动转成文字再交给角色。使用 DeepSeek ASR；关闭后只保留音频文件。',
+      },
+      'worlds.companion.screenEnabled': {
+        type: 'boolean',
+        title: '允许看屏幕（可选）',
+        description: '允许角色截取当前桌面。默认关闭；只应在明确需要时开启。',
+      },
+      'worlds.companion.biliSelfWatchEnabled': {
+        type: 'boolean',
+        title: 'B站自己看',
+        description: '按设定间隔从观看记录或兴趣主题中挑视频，读取信息、字幕和评论后记录观看账。',
+      },
+      'worlds.companion.biliSelfWatchEveryMinutes': {
+        type: 'integer',
+        title: '自己看间隔（分钟）',
+        minimum: 30,
+        maximum: 1440,
+        description: '两次自己看之间的最短间隔；过短会频繁请求 B站并增加消耗。',
+      },
+      'worlds.companion.biliSelfWatchTopics': {
+        type: 'string',
+        title: '自己看主题',
+        description: '观看记录为空时按这些关键词找视频；留空则不自动开始自己看。',
+      },
+      'worlds.companion.biliCaptureIntervalSec': {
+        type: 'number',
+        title: '一起看采样间隔',
+        minimum: 0.2,
+        maximum: 5,
+        multipleOf: 0.1,
+        'x-suffix': '秒',
+        description: '播放中每隔多久抽一张画面。默认 0.8 秒；太小会增加 CPU 和截图开销。',
+      },
+      'worlds.companion.biliObserveIntervalSec': {
+        type: 'number',
+        title: '观察图集间隔',
+        minimum: 2,
+        maximum: 120,
+        multipleOf: 1,
+        'x-suffix': '秒',
+        description: '每隔多久把最近几张画面拼成图集交给角色。默认 5 秒。',
+      },
+      'worlds.companion.biliObserveCells': {
+        type: 'integer',
+        title: '每张图集最多几格',
+        minimum: 2,
+        maximum: 9,
+        'x-suffix': '格',
+        description: '图集包含的最近画面数，默认 4 格。格数越多，单次观察消耗越大。',
+      },
       'worlds.companion.proactiveEnabled': {
         type: 'boolean',
         title: '主动联系',
-        description: '开启后，它会按自己的生活和时间找你说一句；关掉后只回应，不主动开口。',
+        description: '开启后角色会依据自己的状态和日程主动开口；关闭后只回应，不主动发起。',
         'x-hot': true,
       },
       'worlds.companion.proactiveDailyCap': {
         type: 'integer',
         title: '每天主动上限',
-        description: '0 表示不限制；建议 2-6。',
+        description: '每天最多主动联系几次；0 表示不限制，建议按角色关系设为 2-6 次。',
         minimum: 0,
         maximum: 24,
         'x-suffix': '次',
         'x-hot': true,
       },
+      'worlds.companion.proactiveDecision': {
+        type: 'string',
+        title: '开口决策',
+        description: '主动开口的决策方式：综合判断会权衡由头价值和打扰成本；只记录只观察不改变行为；固定阈值沿用旧版。默认综合判断。',
+        enum: ['综合判断', '只记录', '固定阈值'],
+        'x-hot': true,
+      },
+      'worlds.companion.proactiveClinginess': {
+        type: 'number',
+        title: '黏人度',
+        description: '角色主动开口的积极程度：数值越高越愿意开口，但不会忽略忙碌、刚聊过和被忽略的成本。',
+        minimum: 0,
+        maximum: 2,
+        multipleOf: 0.05,
+        'x-hot': true,
+      },
       'worlds.companion.idleGateMin': {
         type: 'integer',
         title: '刚聊完的静默窗口（分钟）',
-        description: '对方刚说过话的这段时间里不主动打扰。',
+        description: '对方刚说完话后的一段时间内不主动打扰。',
         minimum: 0,
         maximum: 240,
         'x-suffix': '分钟',
@@ -163,34 +365,37 @@ export const COMPANION_CONFIG_GROUP: CompanionConfigGroup = {
       'worlds.companion.quietStart': {
         type: 'string',
         title: '免打扰开始',
-        description: 'HH:MM；与结束时间相同视为关闭免打扰。',
+        description: '免打扰开始时点（HH:MM）；与结束时间相同表示关闭。',
         'x-hot': true,
       },
       'worlds.companion.quietEnd': {
         type: 'string',
         title: '免打扰结束',
+        description: '免打扰结束时点（HH:MM）。',
         'x-hot': true,
       },
       'worlds.companion.sleepStart': {
         type: 'string',
         title: '睡觉开始',
-        description: '睡觉时段精力回升，且不会主动联系。',
+        description: '角色进入睡眠的时点；睡眠时精力恢复，也不会主动联系。',
         'x-hot': true,
       },
       'worlds.companion.sleepEnd': {
         type: 'string',
         title: '睡觉结束',
+        description: '角色醒来的时点。',
         'x-hot': true,
       },
       'worlds.companion.agendaEnabled': {
         type: 'boolean',
         title: '每日节目单',
-        description: '每天自动安排几件小事，状态与主动联系会引用它。',
+        description: '每天为角色自动安排几件小事；日程会参与状态和主动开口的判断。',
         'x-hot': true,
       },
       'worlds.companion.energyDecayPerHour': {
         type: 'number',
         title: '醒着时精力消耗（每小时）',
+        description: '醒着时每小时减少的精力值；0 表示不消耗。',
         minimum: 0,
         maximum: 20,
         'x-scale': 1,
@@ -198,6 +403,7 @@ export const COMPANION_CONFIG_GROUP: CompanionConfigGroup = {
       'worlds.companion.journalInPrompt': {
         type: 'integer',
         title: '上下文里带几条最近日记',
+        description: '每轮放入上下文的最近日记条数；0 表示不带。',
         minimum: 0,
         maximum: 5,
         'x-suffix': '条',
@@ -206,18 +412,19 @@ export const COMPANION_CONFIG_GROUP: CompanionConfigGroup = {
       'worlds.companion.memoryEnabled': {
         type: 'boolean',
         title: '内置记忆',
-        description: '关掉后不再写入/召回；已有记录仍留在数据目录。',
+        description: '关闭后不再写入或召回记忆；已有记录仍保留在数据目录。',
         'x-hot': true,
       },
       'worlds.companion.memoryCapture': {
         type: 'boolean',
         title: '自动捕获对话',
-        description: '把外部消息追加进原始事件层（可裁剪），是“记得你说过什么”的原料。',
+        description: '把外部消息写入原始事件层，作为长期记忆的原料；可设置保留天数。',
         'x-hot': true,
       },
       'worlds.companion.memoryRetentionDays': {
         type: 'integer',
         title: '原始事件保留天数',
+        description: '原始对话事件在磁盘上的保留天数；过期自动裁剪。',
         minimum: 3,
         maximum: 365,
         'x-suffix': '天',
@@ -226,32 +433,40 @@ export const COMPANION_CONFIG_GROUP: CompanionConfigGroup = {
       'worlds.companion.memoryNotesInPrompt': {
         type: 'integer',
         title: '常驻笔记进提示词条数',
+        description: '常驻笔记进入上下文的条数；0 表示不带。',
         minimum: 0,
         maximum: 12,
         'x-suffix': '条',
         'x-hot': true,
       },
+      'worlds.companion.userModelInPrompt': {
+        type: 'boolean',
+        title: '用户模型',
+        description: '从记忆中归纳用户的身份、近况和关注点，作为角色理解对方的参考；推测会以不确定语气表达。',
+        'x-hot': true,
+      },
       'worlds.companion.workingMemoryInPrompt': {
         type: 'boolean',
         title: '工作记忆（今天聊过什么）',
-        description: '把近 24 小时最值得记的 1-3 件事压成一行放进上下文，减少“今天说过啥”的失忆。',
+        description: '把最近 24 小时最值得记住的 1-3 件事写进上下文，减少重复询问。',
         'x-hot': true,
       },
       'worlds.companion.emotionEchoEnabled': {
         type: 'boolean',
         title: '情绪回声',
-        description: '对方说“累/烦/开心”时，提示模型“上次同类情绪是因为什么”，由模型决定提不提。',
+        description: '用户表达疲惫、烦躁或开心时，提示角色回忆类似情绪的经历；是否提起由角色决定。',
         'x-hot': true,
       },
       'worlds.companion.musingEnabled': {
         type: 'boolean',
         title: '胡思乱想',
-        description: '空闲时让它基于旧记忆自己联想 1-2 条（低权重、默认不进上下文，可被检索）。会多一次模型调用。',
+        description: '角色空闲时基于旧记忆做一次低权重联想；会额外消耗一次模型调用。',
         'x-hot': true,
       },
       'worlds.companion.musingIdleHours': {
         type: 'integer',
         title: '空闲多少小时后开始胡思乱想',
+        description: '角色空闲达到多少小时后开始胡思乱想。',
         minimum: 1,
         maximum: 48,
         'x-suffix': '小时',
@@ -260,6 +475,7 @@ export const COMPANION_CONFIG_GROUP: CompanionConfigGroup = {
       'worlds.companion.musingDailyCap': {
         type: 'integer',
         title: '每天胡思乱想上限',
+        description: '每天最多进行几次空闲联想；0 表示关闭。',
         minimum: 0,
         maximum: 6,
         'x-suffix': '次',
@@ -268,63 +484,63 @@ export const COMPANION_CONFIG_GROUP: CompanionConfigGroup = {
       'worlds.companion.mergeEnabled': {
         type: 'boolean',
         title: '合并式遗忘',
-        description: '夜间把相似经历合并成一条摘要，原文归档可查；高权重记录不合并。',
+        description: '夜间把相似经历合并为摘要，原文保留可查；高权重记录不参与合并。',
         'x-hot': true,
       },
       'worlds.companion.mergeSimilarity': {
         type: 'number',
         title: '合并相似度阈值',
-        description: '0.3 更激进、0.9 更保守；越高越不容易把不同的事并在一起。',
+        description: '合并相似度阈值：越低越容易合并，越高越保守。',
         minimum: 0.3,
         maximum: 0.9,
-        'x-scale': 0.05,
+        multipleOf: 0.05,
         'x-hot': true,
       },
       'worlds.companion.mindLogLevel': {
         type: 'string',
         title: '心理活动日志',
-        description: '记录主动开口/回声/记忆写入/夜间整理等决策，只给面板看，不进模型上下文；off 关闭。',
+        description: '记录主动开口、记忆写入和夜间整理等决策，仅供面板查看，不进入模型上下文。',
         enum: ['off', 'summary'],
         'x-hot': true,
       },
       'worlds.companion.weatherEnabled': {
         type: 'boolean',
         title: '天气触发',
-        description: '用 Open-Meteo 免费接口按城市查询当前天气；下雨/降温/高温/低温时产生候选。默认关闭，不填城市不会请求。',
+        description: '按城市查询天气，在降雨、降温或高温时产生主动开口的由头。默认关闭；未填城市不会请求。',
         'x-hot': true,
       },
       'worlds.companion.weatherCity': {
         type: 'string',
         title: '天气城市',
-        description: '例如「杭州」「北京」。只用于地理编码和天气查询；留空则不查询。',
+        description: '用于天气查询的城市名；留空则关闭天气触发。',
       },
       'worlds.companion.gitmemWorkspace': {
         type: 'string',
         title: 'GitMem 工作区',
-        description: '留空 = <botDir>/workspace；也可填绝对路径。只用于旧档案读穿，不写入。',
+        description: '旧 GitMem 工作区路径；留空使用角色数据目录下的 workspace。',
       },
       'worlds.companion.gitmemReadThrough': {
         type: 'boolean',
         title: '旧 GitMem 读穿',
-        description: '主记忆没命中时，只读检索 workspace 里的 notes/handoffs；不写入主库。默认关闭。',
+        description: '主记忆没有命中时，只读查询旧 GitMem 笔记；不会写入主记忆。默认关闭。',
       },
       'worlds.companion.holidayEnabled': {
         type: 'boolean',
         title: '节日触发',
-        description: '开启后每天查一次中国法定节假日（nager.date，免费）；失败时回退到固定公历节日。默认关闭。',
+        description: '每天查询中国法定节假日并产生由头；失败时使用固定公历节日。默认关闭。',
         'x-hot': true,
       },
       'worlds.companion.cognitionMode': {
         type: 'string',
         title: '背景念头 → 意图',
-        description: '实验性功能，默认 off。shadow 只记录“她此刻想到了什么”；act 会按意图写日记/休息，行为还不稳定。',
+        description: '实验性背景念头；记录模式只观察，行动模式会按念头写日记或休息，行为尚不稳定。',
         enum: ['off', 'shadow', 'act'],
         'x-hot': true,
       },
       'worlds.companion.cognitionIntervalMin': {
         type: 'number',
         title: '念头间隔（分钟）',
-        description: '实验性功能：两次背景念头之间至少隔多久；默认 10 分钟。',
+        description: '两次背景念头之间的最短间隔，默认 10 分钟。',
         minimum: 1,
         maximum: 60,
         'x-hot': true,
@@ -332,15 +548,89 @@ export const COMPANION_CONFIG_GROUP: CompanionConfigGroup = {
       'worlds.companion.cognitionContactMode': {
         type: 'string',
         title: '意图联系',
-        description: '实验性功能：hold 只把“想找他”放在心里（默认）；send 才会过免打扰/额度/未回应/发送前复核后真的推送。',
+        description: '实验性意图联系；hold 只保留想法，send 才会经过免打扰、额度和未回应检查后发送。',
         enum: ['hold', 'send'],
         'x-hot': true,
       },
       'worlds.companion.styleNote': {
         type: 'string',
         title: '风格补充',
-        description: '追加到环境提示词末尾。写口癖、称呼、忌讳都行；留空则不加。',
+        description: '追加到角色环境提示词末尾的写作风格、称呼和忌讳；留空不追加。',
       },
     },
   },
 };
+
+/** 分类后的设置页表单：记忆 / QQ / B站 / 试验性功能。 */
+const FLAT_PROPERTIES = COMPANION_CONFIG_GROUP.schema.properties;
+const property = (name: string): [string, Record<string, unknown>] => {
+  const path = `worlds.companion.${name}`;
+  const value = FLAT_PROPERTIES[path];
+  if (!value) throw new Error(`配置项不存在：${path}`);
+  return [path, value];
+};
+const pick = (names: string[]): Record<string, Record<string, unknown>> => Object.fromEntries(names.map(property));
+
+const MEMORY_KEYS = [
+  'displayName',
+  'proactiveEnabled', 'proactiveDailyCap', 'proactiveDecision', 'proactiveClinginess',
+  'idleGateMin', 'quietStart', 'quietEnd', 'sleepStart', 'sleepEnd',
+  'agendaEnabled', 'energyDecayPerHour', 'journalInPrompt',
+  'memoryEnabled', 'memoryCapture', 'memoryRetentionDays', 'memoryNotesInPrompt',
+  'userModelInPrompt', 'workingMemoryInPrompt', 'emotionEchoEnabled',
+  'musingEnabled', 'musingIdleHours', 'musingDailyCap',
+  'mergeEnabled', 'mergeSimilarity', 'mindLogLevel',
+  'weatherEnabled', 'weatherCity', 'holidayEnabled',
+  'gitmemWorkspace', 'gitmemReadThrough', 'styleNote',
+];
+const QQ_KEYS = ['qqChannelEnabled', 'qqTranscribeVoice'];
+const BILI_KEYS = [
+  'biliChannelEnabled', 'biliCookieFile', 'biliInboxPushEnabled', 'biliInboxPollMinutes',
+  'biliBrowserPath', 'biliReplyEnabled', 'biliInteractEnabled', 'biliOwnerUid', 'biliDailyComments',
+  'biliSelfWatchEnabled', 'biliSelfWatchEveryMinutes', 'biliSelfWatchTopics',
+  'biliCaptureIntervalSec', 'biliObserveIntervalSec', 'biliObserveCells',
+];
+const EXPERIMENTAL_KEYS = ['screenEnabled', 'cognitionMode', 'cognitionIntervalMin', 'cognitionContactMode'];
+
+export const COMPANION_CONFIG_GROUPS: CompanionConfigGroup[] = [
+  {
+    id: 'world:companion:memory',
+    owner: 'world:companion',
+    schema: {
+      type: 'object',
+      title: '记忆',
+      description: '长期记忆、生活节奏、主动联系与角色风格。',
+      properties: pick(MEMORY_KEYS),
+    },
+  },
+  {
+    id: 'world:companion:qq',
+    owner: 'world:companion',
+    schema: {
+      type: 'object',
+      title: 'QQ',
+      description: '可选的原生 OneBot 通道；关闭时不连接、不显示面板，也不注册通道工具。',
+      properties: pick(QQ_KEYS),
+    },
+  },
+  {
+    id: 'world:companion:bili',
+    owner: 'world:companion',
+    schema: {
+      type: 'object',
+      title: 'B站',
+      description: '可选的 B站 通道、通知、账号动作、自己看与一起看观察。',
+      properties: pick(BILI_KEYS),
+    },
+  },
+  {
+    id: 'world:companion:experimental',
+    owner: 'world:companion',
+    schema: {
+      type: 'object',
+      title: '试验性功能',
+      description: '尚未稳定的实验能力，默认关闭或只记录，不建议一开始全开。',
+      properties: pick(EXPERIMENTAL_KEYS),
+    },
+  },
+];
