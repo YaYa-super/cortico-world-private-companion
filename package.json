@@ -12,7 +12,11 @@
     "proactive",
     "memory",
     "portable-memory",
-    "memory-import"
+    "memory-import",
+    "qq",
+    "bilibili",
+    "onebot",
+    "integration"
   ],
   "author": "yaya-super",
   "license": "MIT",
@@ -38,7 +42,8 @@
       "migration",
       "integration",
       "qq",
-      "bilibili"
+      "bilibili",
+      "onebot"
     ]
   },
   "files": [
