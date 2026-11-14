@@ -14,9 +14,13 @@
     "portable-memory",
     "memory-import",
     "qq",
-    "bilibili",
-    "onebot",
-    "integration"
+    "im",
+    "internet",
+    "browser",
+    "video",
+    "external-setup",
+    "high-cost",
+    "unofficial-api"
   ],
   "author": "yaya-super",
   "license": "MIT",
@@ -40,10 +44,14 @@
       "memory",
       "import-export",
       "migration",
-      "integration",
       "qq",
-      "bilibili",
-      "onebot"
+      "im",
+      "internet",
+      "browser",
+      "video",
+      "external-setup",
+      "high-cost",
+      "unofficial-api"
     ]
   },
   "files": [
