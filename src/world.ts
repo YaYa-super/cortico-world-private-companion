@@ -2940,13 +2940,15 @@ export class CompanionWorld implements World {
         for (const message of incoming) {
           const watched = message.bvid || message.title ? this.biliWatch.find({ bvid: message.bvid, title: message.title }) : null;
           let text: string;
+          const fromOwner = Boolean(this.biliOwnerUid && String(session.talkerId) === this.biliOwnerUid);
+          const ownerLabel = fromOwner ? '主人本人' : `来访用户 ${session.name}`;
           if (message.kind === 'share-video') {
             const link = message.bvid ? `https://www.bilibili.com/video/${message.bvid}` : '';
-            text = `[B站私信 · talker_id=${session.talkerId}] ${session.name} 分享了视频《${message.title || message.text}》${message.author ? `（UP：${message.author}）` : ''}${link ? `\n${link}` : ''}${watched ? `\n（看过：${watched.at.slice(0, 10)} ${watched.bvid}《${watched.title}》；要重看带 force:true）` : ''}`;
+            text = `[B站私信 · ${ownerLabel}分享 · talker_id=${session.talkerId}] ${session.name} 分享了视频《${message.title || message.text}》${message.author ? `（UP：${message.author}）` : ''}${link ? `\n${link}` : ''}${watched ? `\n（看过：${watched.at.slice(0, 10)} ${watched.bvid}《${watched.title}》；要重看带 force:true）` : ''}`;
           } else {
-            text = `[B站私信 · talker_id=${session.talkerId}] ${session.name}：${message.text}`;
+            text = `[B站私信 · ${ownerLabel} · talker_id=${session.talkerId}] ${session.name}：${message.text}`;
           }
-          push('bili.dm', text, { talkerId: session.talkerId, at: message.at, kind: message.kind, bvid: message.bvid || '' });
+          push('bili.dm', text, { talkerId: session.talkerId, at: message.at, kind: message.kind, bvid: message.bvid || '', fromOwner });
           dmSeen[String(session.talkerId)] = Math.max(previous, message.at);
         }
       }
