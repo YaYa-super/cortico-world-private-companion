@@ -114,6 +114,10 @@ export class CompanionWorld implements World {
   private readonly biliOwnerUid: string;
   private togetherBvid = '';
   private lastTogetherFrame = '';
+  private lastTogetherMontage = '';
+  private lastTogetherMontageAt = '';
+  private lastTogetherMontageTitle = '';
+  private lastTogetherMontageCells = 0;
   private togetherObserveTimer: ReturnType<typeof setInterval> | null = null;
   private togetherObserveInFlight = false;
   private qqChannelRunning = false;
@@ -420,7 +424,7 @@ export class CompanionWorld implements World {
         ...(cfg.biliChannelEnabled ? [{
           label: 'B站',
           state: 'offline',
-          hint: '只读层设计中',
+          hint: '浏览 / 通知 / 一起看已接入',
         }] : []),
       ],
       badges: [
@@ -456,7 +460,7 @@ export class CompanionWorld implements World {
         ...(cfg.biliChannelEnabled ? [{
           id: 'bili',
           title: 'B站',
-          description: 'B 站只读层设计：搜索、视频信息、字幕、弹幕、热评、观看记录；暂不发起请求。',
+          description: 'B站面板：搜索、视频信息、字幕、弹幕、热评、观看记录与一起看。',
         }] : []),
       ],
       invoke: (panel, method, args) => {
@@ -624,6 +628,22 @@ export class CompanionWorld implements World {
       const patch = list[0] && typeof list[0] === 'object' ? list[0] as Record<string, unknown> : {};
       const result = await this.toolBiliDmReply({ talker_id: patch.talker_id, text: patch.text, confirm: true });
       return { result };
+    }
+    if (method === 'last_frame') {
+      if (!this.lastTogetherMontage || !existsSync(this.lastTogetherMontage)) {
+        return { image: '', at: '', title: '', cells: 0 };
+      }
+      try {
+        const bytes = readFileSync(this.lastTogetherMontage);
+        return {
+          image: `data:image/jpeg;base64,${bytes.toString('base64')}`,
+          at: this.lastTogetherMontageAt,
+          title: this.lastTogetherMontageTitle,
+          cells: this.lastTogetherMontageCells,
+        };
+      } catch {
+        return { image: '', at: '', title: '', cells: 0 };
+      }
     }
     if (method === 'share_frame') {
       const patch = list[0] && typeof list[0] === 'object' ? list[0] as Record<string, unknown> : { text: list[0] };
@@ -2535,22 +2555,25 @@ export class CompanionWorld implements World {
     this.togetherAutoBusy = true;
     try {
     const wanted = query.trim();
+    const maxSec = Math.max(1, Number(this.cfg().biliMaxVideoMinutes) || 30) * 60;
+    const minSec = Math.max(0, Number(this.cfg().biliSelfWatchMinMinutes) || 0) * 60;
+    const fits = (duration: number): boolean => !duration || (duration >= minSec && duration <= maxSec);
     let candidate: { bvid: string; title: string } | null = null;
     if (wanted) {
       const hits = await this.bili.search(wanted, 8).catch(() => []);
-      const first = hits[0];
+      const first = hits.find((item) => fits(item.duration));
       if (first) candidate = { bvid: first.bvid, title: first.title };
     } else {
       const history = await this.bili.history(8).catch(() => []);
-      const first = history.find((item) => item.bvid);
+      const first = history.find((item) => item.bvid && fits(item.duration));
       if (first) candidate = { bvid: first.bvid, title: first.title };
       if (!candidate) {
         const popular = await this.bili.popular(8).catch(() => []);
-        const firstPopular = popular[0];
+        const firstPopular = popular.find((item) => fits(item.duration));
         if (firstPopular) candidate = { bvid: firstPopular.bvid, title: firstPopular.title };
       }
     }
-    if (!candidate) throw new Error(wanted ? `没有搜到「${wanted}」` : '没有可看的视频');
+    if (!candidate) throw new Error(wanted ? `没有搜到「${wanted}」的合适视频` : '没有合适的视频');
     await this.togetherOpen(candidate.bvid);
     const status = await this.togetherControl('play');
     return { ...status, bvid: candidate.bvid, title: candidate.title };
@@ -2625,6 +2648,10 @@ export class CompanionWorld implements World {
       const montage = join(dir, `observe-${Date.now()}.jpg`);
       if (!montageImages(chosen, montage, cols, rows)) { this.clearTogetherSamples(); return; }
       const bytes = readFileSync(montage);
+      this.lastTogetherMontage = montage;
+      this.lastTogetherMontageAt = new Date().toISOString();
+      this.lastTogetherMontageTitle = status.title || this.togetherBvid || 'B站视频';
+      this.lastTogetherMontageCells = chosen.length;
       this.lastTogetherObserveAt = Date.now();
       for (const old of this.togetherSamples) {
         if (old !== this.lastTogetherFrame) { try { unlinkSync(old); } catch { /* ignore */ } }
@@ -2874,7 +2901,7 @@ export class CompanionWorld implements World {
     if (!this.cfg().biliChannelEnabled) return 'B站通道未启用（可选功能，默认关闭）。';
     const bvid = trimText(args.bvid, 30);
     if (!bvid) return 'bili_frames 需要 bvid。';
-    const count = Math.max(1, Math.min(4, Number(args.count) || 3));
+    const count = Math.max(1, Math.min(6, Number(args.count) || 3));
     const tmp = mkdtempSync(join(tmpdir(), 'coo-bili-'));
     try {
       const shots = await this.bili.videoShots(bvid);
@@ -2882,7 +2909,7 @@ export class CompanionWorld implements World {
       if (!response.ok) return `缩略图网格下载失败：HTTP ${response.status}`;
       const input = join(tmp, `${bvid}-sprite.jpg`);
       writeFileSync(input, new Uint8Array(await response.arrayBuffer()));
-      const frames = cropSprite(input, shots.cols, shots.rows, shots.cellW, shots.cellH, count);
+      const frames = cropSprite(input, shots.cols, shots.rows, shots.cellW, shots.cellH, count, `${bvid}:${Date.now()}`);
       if (!frames.length) return '没有抽到帧（ffmpeg 不可用，或缩略图网格尺寸异常）。';
       const dir = join(this.dataDir, 'bili', 'frames');
       mkdirSync(dir, { recursive: true });
@@ -2964,20 +2991,31 @@ export class CompanionWorld implements World {
     }
   }
 
-  private biliSelfWatchConfig(): { enabled: boolean; everyMinutes: number; topics: string } {
+  private biliSelfWatchConfig(): {
+    enabled: boolean; everyMinutes: number; topics: string;
+    textLimit: number; framesLimit: number; framesCount: number;
+    minMinutes: number; maxMinutes: number;
+  } {
     const cfg = this.cfg();
     const file = join(this.dataDir, 'bili', 'selfwatch-config.json');
+    let local: Record<string, unknown> = {};
     try {
-      if (existsSync(file)) {
-        const local = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
-        return {
-          enabled: local.enabled === true,
-          everyMinutes: Math.max(30, Math.min(1440, Number(local.everyMinutes) || cfg.biliSelfWatchEveryMinutes || 180)),
-          topics: String(local.topics ?? cfg.biliSelfWatchTopics ?? ''),
-        };
-      }
+      if (existsSync(file)) local = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
     } catch { /* fall through */ }
-    return { enabled: cfg.biliSelfWatchEnabled === true, everyMinutes: cfg.biliSelfWatchEveryMinutes || 180, topics: cfg.biliSelfWatchTopics || '' };
+    const number = (value: unknown, fallback: number, min: number, max: number): number => {
+      const parsed = Number(value);
+      return Math.max(min, Math.min(max, Number.isFinite(parsed) ? parsed : fallback));
+    };
+    return {
+      enabled: local.enabled === undefined ? cfg.biliSelfWatchEnabled === true : local.enabled === true,
+      everyMinutes: number(local.everyMinutes ?? cfg.biliSelfWatchEveryMinutes, 180, 30, 1440),
+      topics: String(local.topics ?? cfg.biliSelfWatchTopics ?? ''),
+      textLimit: number(cfg.biliSelfWatchTextDailyLimit, 3, 0, 12),
+      framesLimit: number(cfg.biliSelfWatchFramesDailyLimit, 1, 0, 6),
+      framesCount: number(cfg.biliSelfWatchFramesCount, 6, 1, 6),
+      minMinutes: number(cfg.biliSelfWatchMinMinutes, 1, 0, 120),
+      maxMinutes: number(cfg.biliMaxVideoMinutes, 30, 1, 240),
+    };
   }
 
   private async maybeBiliSelfWatch(now: Date): Promise<void> {
@@ -2985,40 +3023,100 @@ export class CompanionWorld implements World {
     const selfWatch = this.biliSelfWatchConfig();
     if (!this.host || !cfg.biliChannelEnabled || !selfWatch.enabled || this.biliSelfWatchInFlight) return;
     if (this.state.sleeping) return;
-    const every = Math.max(30, Math.min(1440, selfWatch.everyMinutes)) * 60_000;
+    const every = selfWatch.everyMinutes * 60_000;
     const stateFile = join(this.dataDir, 'bili', 'self-watch-state.json');
-    let lastAt = 0;
-    let lastBvid = '';
+    const day = localParts(now, this.tz()).date;
+    const state: { day: string; lastAt: number; lastBvid: string; textCount: number; framesCount: number } = {
+      day, lastAt: 0, lastBvid: '', textCount: 0, framesCount: 0,
+    };
     try {
       if (existsSync(stateFile)) {
         const saved = JSON.parse(readFileSync(stateFile, 'utf8')) as Record<string, unknown>;
-        lastAt = Date.parse(String(saved.lastAt || '')) || 0;
-        lastBvid = String(saved.bvid || '');
+        if (String(saved.day || '') === day) {
+          state.textCount = Math.max(0, Number(saved.textCount) || 0);
+          state.framesCount = Math.max(0, Number(saved.framesCount) || 0);
+          state.lastAt = Date.parse(String(saved.lastAt || '')) || 0;
+          state.lastBvid = String(saved.bvid || '');
+        }
       }
     } catch { /* ignore */ }
-    if (Number.isFinite(lastAt) && now.getTime() - lastAt < every) return;
+    if (Number.isFinite(state.lastAt) && now.getTime() - state.lastAt < every) return;
+    const canSee = (() => {
+      try { return this.host?.modelFacts.accepts('image/jpeg') === true; } catch { return false; }
+    })();
+    const textLeft = selfWatch.textLimit > 0 && state.textCount < selfWatch.textLimit;
+    const framesLeft = canSee && selfWatch.framesLimit > 0 && state.framesCount < selfWatch.framesLimit;
+    if (!textLeft && !framesLeft) return;
     this.biliSelfWatchInFlight = true;
     try {
+      const minSec = selfWatch.minMinutes * 60;
+      const maxSec = selfWatch.maxMinutes * 60;
+      const fits = (duration: number): boolean => !duration || (duration >= minSec && duration <= maxSec);
       const history = await this.bili.history(10).catch(() => []);
-      let candidate = history.find((item) => item.bvid !== lastBvid && !this.biliWatch.find({ bvid: item.bvid, title: item.title })) || null;
+      let candidate = history.find((item) => item.bvid !== state.lastBvid
+        && fits(item.duration)
+        && !this.biliWatch.find({ bvid: item.bvid, title: item.title })) || null;
       if (!candidate && selfWatch.topics.trim()) {
         const hits = await this.bili.search(selfWatch.topics.trim(), 8).catch(() => []);
-        const hit = hits.find((item) => item.bvid !== lastBvid && !this.biliWatch.find({ bvid: item.bvid, title: item.title }));
+        const hit = hits.find((item) => item.bvid !== state.lastBvid
+          && fits(item.duration)
+          && !this.biliWatch.find({ bvid: item.bvid, title: item.title }));
         if (hit) candidate = { bvid: hit.bvid, title: hit.title, author: hit.owner, progress: 0, duration: hit.duration, at: now.toISOString() };
       }
       if (!candidate) return;
-      const result = await this.toolBiliWatch({ bvid: candidate.bvid, note: '' });
+      const total = state.textCount + state.framesCount;
+      const useFrames = framesLeft && (!textLeft || total % 2 === 1);
+      const result = await this.toolBiliWatch({ bvid: candidate.bvid, note: '', silent: useFrames });
+      if (useFrames) {
+        const frames = await this.toolBiliFrames({ bvid: candidate.bvid, count: selfWatch.framesCount });
+        if (typeof frames === 'object' && Array.isArray(frames.blobs) && frames.blobs.length) {
+          void this.host.pushEvent({
+            type: 'bili.watch', ts: new Date().toISOString(), source: 'bilibili', origin: 'external', senderKey: 'bili.self',
+            text: `[B站自己看 · 带画面] ${candidate.title} 的画面，和上一条文字一起看。`,
+            meta: { kind: 'bili.watch', bvid: candidate.bvid, title: candidate.title, via: 'selfwatch-frames' },
+            blobs: frames.blobs,
+          }, { trigger: 'debounce' }).catch((error) => {
+            this.host?.log.warn('[companion] B站自己看画面投递失败', String(error));
+          });
+        }
+      }
+      state.lastAt = Date.now();
+      state.lastBvid = candidate.bvid;
+      if (useFrames) state.framesCount += 1;
+      else state.textCount += 1;
       try {
         mkdirSync(join(this.dataDir, 'bili'), { recursive: true });
-        writeFileSync(stateFile, JSON.stringify({ lastAt: now.toISOString(), bvid: candidate.bvid, title: candidate.title }), 'utf8');
+        writeFileSync(stateFile, JSON.stringify({
+          day, lastAt: new Date(state.lastAt).toISOString(), bvid: candidate.bvid, title: candidate.title,
+          textCount: state.textCount, framesCount: state.framesCount,
+        }), 'utf8');
       } catch { /* ignore */ }
-      this.mind('action', `自己看：${candidate.title}`, { bvid: candidate.bvid, result: result.slice(0, 120) });
+      this.mind('action', `自己看：${candidate.title}`, { bvid: candidate.bvid, result: String(result).slice(0, 120), frames: useFrames });
       this.save(false);
     } catch (error) {
       this.host?.log.warn('[companion] B站自己看失败', String(error));
     } finally {
       this.biliSelfWatchInFlight = false;
     }
+  }
+
+  private noteBiliWatchTrigger(title: string, bvid: string): void {
+    const at = new Date().toISOString();
+    const key = `bili:watch:${bvid}:${at}`;
+    this.state.pendingTrigger = {
+      key,
+      reason: `刚看了 B站视频《${title}》，有点想讲讲`,
+      source: 'bili',
+      salience: 0.6,
+      at,
+    };
+    this.state.triggerSeen = Object.fromEntries(
+      Object.entries({ ...(this.state.triggerSeen ?? {}), [key]: at })
+        .filter(([, ts]) => Date.parse(ts) > Date.now() - 7 * 86_400_000)
+        .slice(-100),
+    );
+    this.state.proactiveDueAt = null;
+    this.mind('trigger', `B站观看触发：${title}`, { trigger: key, source: 'bili', salience: 0.6 });
   }
 
   private async toolBiliWatch(args: Record<string, unknown>): Promise<string> {
@@ -3037,126 +3135,17 @@ export class CompanionWorld implements World {
     const hot = comments.slice(0, 3).map((comment) => `${comment.user}：${comment.message}`).join(' / ');
     const summary = `看了 ${info.title}（UP：${info.owner}）。${excerpt ? `字幕摘录：${excerpt}` : ''}${hot ? `热评：${hot}` : ''}${note ? ` 她的感受：${note}` : ''}`;
     this.biliWatch.record({ at: new Date().toISOString(), bvid, title: info.title, owner: info.owner, duration: info.duration, via: 'tool' });
+    this.noteBiliWatchTrigger(info.title, bvid);
     if (this.cfg().memoryEnabled && this.cfg().memoryCapture) {
       this.memoryStore.add({ text: summary, kind: 'episode', scope: `bili:${bvid}`, source: 'bili', tags: ['bili', 'watch'], importance: 0.55 });
     }
-    void this.host?.pushEvent({
+    if (args.silent !== true) void this.host?.pushEvent({
       type: 'bili.watch', ts: new Date().toISOString(), source: 'bilibili', origin: 'external', senderKey: 'bili.self',
       text: `[B站自己看] ${summary}`,
       meta: { kind: 'bili.watch', bvid, title: info.title, via: 'tool' },
     }, { trigger: 'debounce' }).catch((error) => {
       this.host?.log.warn('[companion] B站观看事件投递失败', String(error));
     });
-    return `已记下这次观看：${info.title}。${note ? `感受：${note}` : ''}`;
-  }
-
-  private async toolBiliFrames(args: Record<string, unknown>): Promise<string | ToolOutcome> {
-    if (!this.cfg().biliChannelEnabled) return 'B站通道未启用（可选功能，默认关闭）。';
-    const bvid = trimText(args.bvid, 30);
-    if (!bvid) return 'bili_frames 需要 bvid。';
-    const count = Math.max(1, Math.min(4, Number(args.count) || 3));
-    const tmp = mkdtempSync(join(tmpdir(), 'coo-bili-'));
-    try {
-      const shots = await this.bili.videoShots(bvid);
-      const response = await fetch(shots.imageUrl, { headers: { 'user-agent': 'Mozilla/5.0', referer: 'https://www.bilibili.com/' } });
-      if (!response.ok) return `缩略图网格下载失败：HTTP ${response.status}`;
-      const input = join(tmp, `${bvid}-sprite.jpg`);
-      writeFileSync(input, new Uint8Array(await response.arrayBuffer()));
-      const frames = cropSprite(input, shots.cols, shots.rows, shots.cellW, shots.cellH, count);
-      if (!frames.length) return '没有抽到帧（ffmpeg 不可用，或缩略图网格尺寸异常）。';
-      const dir = join(this.dataDir, 'bili', 'frames');
-      mkdirSync(dir, { recursive: true });
-      const stamp = Date.now();
-      frames.forEach((frame, index) => writeFileSync(join(dir, `${bvid}-${stamp}-${index + 1}.jpg`), frame.bytes));
-      let accepts = false;
-      try { accepts = this.host?.modelFacts.accepts('image/jpeg') === true; } catch { accepts = false; }
-      if (accepts) return { text: `[B站视频 ${bvid}，抽了 ${frames.length} 帧]`, blobs: frames };
-      return `已抽 ${frames.length} 帧，保存到 ${dir}/${bvid}-${stamp}-*.jpg（当前模型不吃图）。`;
-    } catch (error) {
-      return `抽帧失败：${error instanceof Error ? error.message : String(error)}`;
-    } finally {
-      try { rmSync(tmp, { recursive: true, force: true }); } catch { /* ignore */ }
-    }
-  }
-
-  private biliSelfWatchConfig(): { enabled: boolean; everyMinutes: number; topics: string } {
-    const cfg = this.cfg();
-    const file = join(this.dataDir, 'bili', 'selfwatch-config.json');
-    try {
-      if (existsSync(file)) {
-        const local = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
-        return {
-          enabled: local.enabled === true,
-          everyMinutes: Math.max(30, Math.min(1440, Number(local.everyMinutes) || cfg.biliSelfWatchEveryMinutes || 180)),
-          topics: String(local.topics ?? cfg.biliSelfWatchTopics ?? ''),
-        };
-      }
-    } catch { /* fall through */ }
-    return { enabled: cfg.biliSelfWatchEnabled === true, everyMinutes: cfg.biliSelfWatchEveryMinutes || 180, topics: cfg.biliSelfWatchTopics || '' };
-  }
-
-  private async maybeBiliSelfWatch(now: Date): Promise<void> {
-    const cfg = this.cfg();
-    const selfWatch = this.biliSelfWatchConfig();
-    if (!this.host || !cfg.biliChannelEnabled || !selfWatch.enabled || this.biliSelfWatchInFlight) return;
-    if (this.state.sleeping) return;
-    const every = Math.max(30, Math.min(1440, selfWatch.everyMinutes)) * 60_000;
-    const stateFile = join(this.dataDir, 'bili', 'self-watch-state.json');
-    let lastAt = 0;
-    let lastBvid = '';
-    try {
-      if (existsSync(stateFile)) {
-        const saved = JSON.parse(readFileSync(stateFile, 'utf8')) as Record<string, unknown>;
-        lastAt = Date.parse(String(saved.lastAt || '')) || 0;
-        lastBvid = String(saved.bvid || '');
-      }
-    } catch { /* ignore */ }
-    if (Number.isFinite(lastAt) && now.getTime() - lastAt < every) return;
-    this.biliSelfWatchInFlight = true;
-    try {
-      const history = await this.bili.history(10).catch(() => []);
-      let candidate = history.find((item) => item.bvid !== lastBvid && !this.biliWatch.find({ bvid: item.bvid, title: item.title })) || null;
-      if (!candidate && selfWatch.topics.trim()) {
-        const hits = await this.bili.search(selfWatch.topics.trim(), 8).catch(() => []);
-        const hit = hits.find((item) => item.bvid !== lastBvid && !this.biliWatch.find({ bvid: item.bvid, title: item.title }));
-        if (hit) candidate = { bvid: hit.bvid, title: hit.title, author: hit.owner, progress: 0, duration: hit.duration, at: now.toISOString() };
-      }
-      if (!candidate) return;
-      const result = await this.toolBiliWatch({ bvid: candidate.bvid, note: '' });
-      try {
-        mkdirSync(join(this.dataDir, 'bili'), { recursive: true });
-        writeFileSync(stateFile, JSON.stringify({ lastAt: now.toISOString(), bvid: candidate.bvid, title: candidate.title }), 'utf8');
-      } catch { /* ignore */ }
-      this.mind('action', `自己看：${candidate.title}`, { bvid: candidate.bvid, result: result.slice(0, 120) });
-      this.save(false);
-    } catch (error) {
-      this.host?.log.warn('[companion] B站自己看失败', String(error));
-    } finally {
-      this.biliSelfWatchInFlight = false;
-    }
-  }
-
-  private async toolBiliWatch(args: Record<string, unknown>): Promise<string> {
-    if (!this.cfg().biliChannelEnabled) return 'B站通道未启用（可选功能，默认关闭）。';
-    const bvid = trimText(args.bvid, 30);
-    if (!bvid) return 'bili_watch 需要 bvid。';
-    const info = await this.bili.info(bvid);
-    const subtitles = await this.bili.subtitles(bvid).catch(() => []);
-    const comments = await this.bili.comments(bvid, 5).catch(() => []);
-    const note = trimText(args.note, 300);
-    const excerpt = subtitles.slice(0, 80).map((line) => line.text).join(' ').slice(0, 1200);
-    const hot = comments.slice(0, 3).map((comment) => `${comment.user}：${comment.message}`).join(' / ');
-    const summary = `看了 ${info.title}（UP：${info.owner}）。${excerpt ? `字幕摘录：${excerpt}` : ''}${hot ? `热评：${hot}` : ''}${note ? ` 她的感受：${note}` : ''}`;
-    const ledgerDir = join(this.dataDir, 'bili');
-    try {
-      mkdirSync(ledgerDir, { recursive: true });
-      appendFileSync(join(ledgerDir, 'watch-ledger.jsonl'), JSON.stringify({ at: new Date().toISOString(), bvid, title: info.title, owner: info.owner, summary }) + '\n', 'utf8');
-    } catch (error) {
-      return `观看记录写盘失败：${error instanceof Error ? error.message : String(error)}`;
-    }
-    if (this.cfg().memoryEnabled && this.cfg().memoryCapture) {
-      this.memoryStore.add({ text: summary, kind: 'episode', scope: `bili:${bvid}`, source: 'bili', tags: ['bili', 'watch'], importance: 0.55 });
-    }
     return `已记下这次观看：${info.title}。${note ? `感受：${note}` : ''}`;
   }
 

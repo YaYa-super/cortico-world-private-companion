@@ -80,6 +80,7 @@ export const SOURCE_VALUE: Record<string, number> = {
   body: 0.7,
   social: 0.6,
   qq: 0.68,
+  bili: 0.62,
   contact: 0.5,
   holiday: 0.5,
   agenda: 0.45,

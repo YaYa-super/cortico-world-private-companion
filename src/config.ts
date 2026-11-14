@@ -37,6 +37,16 @@ export interface CompanionConfig {
   biliSelfWatchEnabled: boolean;
   biliSelfWatchEveryMinutes: number;
   biliSelfWatchTopics: string;
+  /** 自己看每天最多看几条文字视频（0=关闭）。 */
+  biliSelfWatchTextDailyLimit: number;
+  /** 自己看每天最多看几条带画面视频（0=关闭）。 */
+  biliSelfWatchFramesDailyLimit: number;
+  /** 自己看带画面时每次抽几帧；0 = 按片长自动。 */
+  biliSelfWatchFramesCount: number;
+  /** 自己看/自动找视频的最短时长（分钟）。 */
+  biliSelfWatchMinMinutes: number;
+  /** 自己看/自动找视频的最长时长（分钟）。 */
+  biliMaxVideoMinutes: number;
   /** 一起看采样间隔（秒）。 */
   biliCaptureIntervalSec: number;
   /** 一起看观察图集间隔（秒）。 */
@@ -138,6 +148,11 @@ export const COMPANION_DEFAULTS: CompanionConfig = {
   biliSelfWatchEnabled: false,
   biliSelfWatchEveryMinutes: 180,
   biliSelfWatchTopics: '',
+  biliSelfWatchTextDailyLimit: 3,
+  biliSelfWatchFramesDailyLimit: 1,
+  biliSelfWatchFramesCount: 6,
+  biliSelfWatchMinMinutes: 1,
+  biliMaxVideoMinutes: 30,
   biliCaptureIntervalSec: 0.8,
   biliObserveIntervalSec: 5,
   biliObserveCells: 4,
@@ -295,6 +310,46 @@ export const COMPANION_CONFIG_GROUP: CompanionConfigGroup = {
         type: 'string',
         title: '自己看主题',
         description: '观看记录为空时按这些关键词找视频；留空则不自动开始自己看。',
+      },
+      'worlds.companion.biliSelfWatchTextDailyLimit': {
+        type: 'integer',
+        title: '自己看文字视频每天上限',
+        minimum: 0,
+        maximum: 12,
+        'x-suffix': '条',
+        description: '每天最多看几条只看文字/字幕/评论的视频；0 表示不自动看文字视频。默认 3 条。',
+      },
+      'worlds.companion.biliSelfWatchFramesDailyLimit': {
+        type: 'integer',
+        title: '自己看带画面每天上限',
+        minimum: 0,
+        maximum: 6,
+        'x-suffix': '条',
+        description: '每天最多看几条带画面的视频；0 表示不自动看图。默认 1 条，避免每天消耗太多画面。',
+      },
+      'worlds.companion.biliSelfWatchFramesCount': {
+        type: 'integer',
+        title: '带画面每次随机抽几帧',
+        minimum: 1,
+        maximum: 6,
+        'x-suffix': '帧',
+        description: '自己看带画面时，每条视频默认随机截取 6 张，避开首尾极端位置；可调低到 1 张。',
+      },
+      'worlds.companion.biliSelfWatchMinMinutes': {
+        type: 'integer',
+        title: '自动找视频最短时长',
+        minimum: 0,
+        maximum: 120,
+        'x-suffix': '分钟',
+        description: '自己看/一起看自动挑视频时，太短的跳过。默认 1 分钟。',
+      },
+      'worlds.companion.biliMaxVideoMinutes': {
+        type: 'integer',
+        title: '自动找视频最长时长',
+        minimum: 1,
+        maximum: 240,
+        'x-suffix': '分钟',
+        description: '自己看/一起看自动挑视频时，超过这个时长的跳过。默认 30 分钟。',
       },
       'worlds.companion.biliCaptureIntervalSec': {
         type: 'number',
@@ -588,6 +643,8 @@ const BILI_KEYS = [
   'biliChannelEnabled', 'biliCookieFile', 'biliInboxPushEnabled', 'biliInboxPollMinutes',
   'biliBrowserPath', 'biliReplyEnabled', 'biliInteractEnabled', 'biliOwnerUid', 'biliDailyComments',
   'biliSelfWatchEnabled', 'biliSelfWatchEveryMinutes', 'biliSelfWatchTopics',
+  'biliSelfWatchTextDailyLimit', 'biliSelfWatchFramesDailyLimit', 'biliSelfWatchFramesCount',
+  'biliSelfWatchMinMinutes', 'biliMaxVideoMinutes',
   'biliCaptureIntervalSec', 'biliObserveIntervalSec', 'biliObserveCells',
 ];
 const EXPERIMENTAL_KEYS = ['screenEnabled', 'cognitionMode', 'cognitionIntervalMin', 'cognitionContactMode'];

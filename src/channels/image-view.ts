@@ -86,13 +86,33 @@ export function montageImages(paths: string[], output: string, cols = 2, rows = 
   return result.status === 0 && existsSync(output);
 }
 
-export function cropSprite(path: string, cols: number, rows: number, cellW: number, cellH: number, count = 4): ImageBlob[] {
+export function cropSprite(path: string, cols: number, rows: number, cellW: number, cellH: number, count = 4, seed = ''): ImageBlob[] {
   const ffmpeg = resolveFfmpeg();
   if (!ffmpeg || cols < 1 || rows < 1 || cellW < 1 || cellH < 1) return [];
   const dir = mkdtempSync(join(tmpdir(), 'coo-sprite-'));
   try {
     const total = cols * rows;
-    const picked = Array.from({ length: Math.max(1, Math.min(6, count)) }, (_, index) => Math.floor((index + 1) * total / (count + 1)));
+    const wanted = Math.max(1, Math.min(6, count));
+    // 伪随机选格：避开首尾极端位置，固定种子保证同一条视频不会抽到全边缘帧。
+    let state = 2166136261;
+    for (const ch of `${seed}:${total}:${wanted}`) state = Math.imul(state ^ ch.charCodeAt(0), 16777619) >>> 0;
+    const rng = (): number => {
+      state = (state + 0x6D2B79F5) >>> 0;
+      let t = state;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const picked: number[] = [];
+    if (total <= 2) {
+      for (let index = 0; index < Math.min(wanted, total); index += 1) picked.push(index);
+    } else {
+      const candidates = Array.from({ length: total - 2 }, (_, index) => index + 1);
+      while (picked.length < wanted && candidates.length) {
+        picked.push(candidates.splice(Math.floor(rng() * candidates.length), 1)[0]!);
+      }
+      picked.sort((a, b) => a - b);
+    }
     const frames: ImageBlob[] = [];
     for (let index = 0; index < picked.length; index += 1) {
       const cell = Math.max(0, Math.min(total - 1, picked[index]));

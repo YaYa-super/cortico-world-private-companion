@@ -1872,6 +1872,7 @@ const BILI_CSS = `
 .cpb-grid{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(290px,.8fr);gap:12px;align-items:start}
 .cpb-col{display:flex;flex-direction:column;gap:12px}
 .cpb-note{color:var(--muted);font-size:10.5px;line-height:1.65;margin-top:7px;white-space:pre-wrap;word-break:break-word}
+.cpb-observe{margin-top:12px}.cpb-observe-img{display:block;width:100%;max-height:520px;object-fit:contain;background:#151310;border:1px solid var(--line);border-radius:12px;margin-top:6px}.cpb-observe-empty{color:var(--muted);font-size:11px;padding:16px;border:1px dashed var(--line);border-radius:10px;text-align:center}
 .cpb-row{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}.cpb-form{display:flex;flex-direction:column;gap:7px}
 .cpb-form .cpb-input{width:100%}.cpb-check{display:flex;align-items:center;gap:6px;font-size:10.5px;color:var(--muted)}
 .cpb-notice-list{display:flex;flex-direction:column;gap:6px;max-height:230px;overflow:auto;margin-top:8px}
@@ -1917,6 +1918,13 @@ return {
         const results = el('div', 'cpb-results'); const detail = el('div', 'cpb-detail2');
         searchCard.append(searchLbl, searchRow, searchMsg, results, detail);
         browse.append(searchCard);
+
+        const observeCard = el('div', 'cpb-card cpb-observe');
+        const observeLbl = el('div', 'cpb-lbl'); observeLbl.append(el('b', '', '一起看观察图集'), el('span', '', '模型正在看的最近一张'));
+        const observeImg = doc.createElement('img'); observeImg.className = 'cpb-observe-img'; observeImg.alt = '一起看观察图集'; observeImg.style.display = 'none';
+        const observeMeta = el('div', 'cpb-note cpb-observe-empty', '还没有观察图集。点「一起看」后，播放中会自动更新。');
+        observeCard.append(observeLbl, observeImg, observeMeta);
+        browse.append(observeCard);
 
         const setBusy = (busy) => { searchBtn.disabled = busy; };
         const showHistory = async () => {
@@ -2000,6 +2008,22 @@ return {
           } finally { togetherBtn.disabled = false; }
         });
 
+        const loadObservation = async () => {
+          try {
+            const result = await ctx.invoke('last_frame', []);
+            if (result?.image) {
+              observeImg.src = result.image;
+              observeImg.style.display = 'block';
+              observeMeta.className = 'cpb-note';
+              observeMeta.textContent = `${result.title || 'B站视频'} · ${result.cells || 0} 格${result.at ? ` · ${new Date(result.at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}` : ''}`;
+            } else {
+              observeImg.style.display = 'none';
+              observeMeta.className = 'cpb-note cpb-observe-empty';
+              observeMeta.textContent = '还没有观察图集。点「一起看」后，播放中会自动更新。';
+            }
+          } catch { /* 观察图集读取失败时保留旧图 */ }
+        };
+
         const loadStatus = async () => {
           try {
             const result = await ctx.invoke('status', []); const nav = result.nav || {};
@@ -2008,7 +2032,8 @@ return {
           } catch { chipText.textContent = '读取失败'; chipDot.className = 'cpb-dot bad'; }
         };
 
-        await loadStatus();
+        await Promise.all([loadStatus(), loadObservation()]);
+        ctx.interval(() => { void loadObservation(); }, 5_000);
       },
     },
   },
