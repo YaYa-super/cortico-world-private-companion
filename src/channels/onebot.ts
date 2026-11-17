@@ -254,6 +254,10 @@ export class OneBotChannel {
     return this.media.list(limit);
   }
 
+  mediaSearch(query: string, limit = 20): ReturnType<ChannelMediaStore['search']> {
+    return this.media.search(query, limit);
+  }
+
   mediaGet(key: string): ReturnType<ChannelMediaStore['get']> {
     return this.media.get(key);
   }
@@ -281,6 +285,14 @@ export class OneBotChannel {
 
   mediaNote(key: string, meaning: string): ReturnType<ChannelMediaStore['attachMeaning']> {
     return this.media.attachMeaning(key, meaning);
+  }
+
+  mediaRemove(key: string): ReturnType<ChannelMediaStore['remove']> {
+    return this.media.remove(key);
+  }
+
+  mediaImportFile(source: string): ReturnType<ChannelMediaStore['importFile']> {
+    return this.media.importFile(source);
   }
 
   receiveText(): string {

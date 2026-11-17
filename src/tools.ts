@@ -320,10 +320,33 @@ export const TOOL_SPECS: ToolSpec[] = [
 
   {
     name: 'qq_media_list',
-    description: '列出最近下载的 QQ 图片/表情包（sha256 短号、路径、已有含义）。',
-    parameters: obj({ limit: { type: 'integer', minimum: 1, maximum: 30, description: '默认 10' } }, []),
+    description: '列出最近下载/导入的图片和表情包（sha256 短号、路径、已有含义），可按含义/文件名搜索。',
+    parameters: obj({
+      limit: { type: 'integer', minimum: 1, maximum: 100, description: '默认 20' },
+      query: { type: 'string', description: '可选：按已有含义、文件名或短号筛选' },
+    }, []),
     tags: ['read'],
     usage: '想知道她存过哪些图/表情时用；不要逐条念给用户。',
+  },
+  {
+    name: 'qq_media_import',
+    description: '把本地图片或整个目录导入媒体库，按内容 hash 与 QQ 图片自动去重；可选调用本机图片描述程序写初始含义。',
+    parameters: obj({
+      path: { type: 'string', description: '图片文件或目录的本地路径' },
+      recursive: { type: 'boolean', description: '目录是否递归，默认 true' },
+      limit: { type: 'integer', minimum: 1, maximum: 2000, description: '本次最多导入多少个文件，默认 200' },
+      caption: { type: 'boolean', description: '是否调用本地描述程序；省略时按配置' },
+      caption_limit: { type: 'integer', minimum: 1, maximum: 200, description: '本次最多自动描述几张，默认 20' },
+    }, ['path']),
+    tags: ['write'],
+    usage: '用户让你收下表情包/图片时用；导入后可以用 qq_media_list 查看，用 qq_view_image 看画面，用 qq_media_note 改含义。',
+  },
+  {
+    name: 'qq_media_delete',
+    description: '从媒体库删除一张图片/表情包，同时删除本地文件。只删除媒体库记录，不影响原始导入目录。',
+    parameters: obj({ key: { type: 'string', description: 'sha256、短号、路径或 URL' } }, ['key']),
+    tags: ['write'],
+    usage: '用户让你删图，或你确认这张图重复/不需要时用；删之前尽量确认短号。',
   },
   {
     name: 'qq_media_note',
@@ -686,8 +709,10 @@ export const TOOL_SUMMARIES: Record<string, string> = {
   bili_search: '搜索 B 站视频（只读）。',
   bili_info: '读取 B 站视频信息（只读）。',
   bili_comments: '读取 B 站热评（只读）。',
-  qq_media_list: '列出已下载的 QQ 图片/表情。',
-  qq_media_note: '给 QQ 图片/表情写含义。',
+  qq_media_list: '列出已下载/导入的图片和表情。',
+  qq_media_note: '给图片/表情写含义或人工纠错。',
+  qq_media_import: '导入本地图片/表情包目录。',
+  qq_media_delete: '从媒体库删除一张图片。',
   qq_view_image: '看 QQ 图片/动图（有含义时不再给图）。',
   qq_actions: '搜索 OneBot action 目录。',
   qq_call: '调用 OneBot action（写操作需确认）。',

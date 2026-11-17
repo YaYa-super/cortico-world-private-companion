@@ -7,7 +7,7 @@
 import { createHash } from 'node:crypto';
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 export interface MediaRecord {
@@ -25,11 +25,15 @@ export interface MediaRecord {
   needsMeaning?: boolean;
   remindedAt?: string;
   lastSeenAt?: string;
+  /** 来源：QQ 下载或本地导入。 */
+  source?: 'qq' | 'import';
+  /** 本地导入时的原始路径。 */
+  sourceFile?: string;
 }
 
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
-const MAX_RECORDS = 500;
+const MAX_RECORDS = 20_000;
 
 function privateHost(hostname: string): boolean {
   const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
@@ -125,10 +129,35 @@ export class ChannelMediaStore {
       .slice(0, Math.max(1, Math.min(100, limit)));
   }
 
+  search(query: string, limit = 20): MediaRecord[] {
+    const needle = query.trim().toLowerCase();
+    const items = [...this.records.values()].filter((item) => !needle
+      || String(item.meaning || '').toLowerCase().includes(needle)
+      || item.hash.includes(needle)
+      || item.path.toLowerCase().includes(needle)
+      || String(item.sourceFile || '').toLowerCase().includes(needle));
+    return items.sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt)).slice(0, Math.max(1, Math.min(100, limit)));
+  }
+
+  all(): MediaRecord[] {
+    return [...this.records.values()].sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt));
+  }
+
   get(key: string): MediaRecord | null {
     const needle = key.trim();
     if (!needle) return null;
     return [...this.records.values()].find((item) => item.hash === needle || item.path === needle || item.url === needle || item.hash.startsWith(needle)) ?? null;
+  }
+
+  remove(key: string): MediaRecord | null {
+    const needle = key.trim();
+    if (!needle) return null;
+    const record = [...this.records.values()].find((item) => item.hash === needle || item.path === needle || item.url === needle || item.hash.startsWith(needle));
+    if (!record) return null;
+    this.records.delete(record.hash);
+    try { rmSync(record.path, { force: true }); } catch { /* 索引先移除，残留文件不影响使用 */ }
+    this.save();
+    return record;
   }
 
   markViewed(record: MediaRecord): void {
@@ -162,7 +191,7 @@ export class ChannelMediaStore {
     return readFileSync(record.path);
   }
 
-  attachMeaning(key: string, meaning: string): MediaRecord | null {
+  attachMeaning(key: string, meaning: string, persist = true): MediaRecord | null {
     const needle = key.trim();
     if (!needle) return null;
     const record = [...this.records.values()].find((item) => item.hash === needle || item.path === needle || item.url === needle || item.hash.startsWith(needle));
@@ -170,9 +199,12 @@ export class ChannelMediaStore {
     record.meaning = meaning.trim().slice(0, 200);
     record.needsMeaning = false;
     record.lastSeenAt = new Date().toISOString();
-    this.save();
+    if (persist) this.save();
     return record;
   }
+
+  /** 批量导入/描述时由调用方控制落盘频率。 */
+  flush(): void { this.save(); }
 
   async capture(raw: string, allowAny = false): Promise<MediaRecord | null> {
     let target = publicHttpUrl(raw);
@@ -225,6 +257,49 @@ export class ChannelMediaStore {
       }
       this.save();
       return record;
+    } catch {
+      return null;
+    }
+  }
+
+  /** 导入本地图片；按内容 sha256 与 QQ 图片共用去重。 */
+  importFile(source: string): { record: MediaRecord; duplicate: boolean } | null {
+    try {
+      const stat = statSync(source);
+      if (!stat.isFile() || stat.size <= 0 || stat.size > MAX_FILE_BYTES) return null;
+      const ext = source.toLowerCase().match(/\.([a-z0-9]+)$/)?.[1] || '';
+      const mime = ext === 'png' ? 'image/png' : ext === 'gif' ? 'image/gif'
+        : ext === 'webp' ? 'image/webp' : ext === 'bmp' ? 'image/bmp'
+          : ext === 'avif' ? 'image/avif' : (ext === 'jpg' || ext === 'jpeg' || ext === 'jfif') ? 'image/jpeg' : '';
+      if (!mime) return null;
+      const bytes = new Uint8Array(readFileSync(source));
+      const hash = createHash('sha256').update(bytes).digest('hex');
+      const existing = this.records.get(hash);
+      const now = new Date().toISOString();
+      if (existing) {
+        existing.lastSeenAt = now;
+        if (!existing.sourceFile) existing.sourceFile = source;
+        this.save();
+        return { record: existing, duplicate: true };
+      }
+      const extOut = mime === 'image/png' ? '.png' : mime === 'image/gif' ? '.gif'
+        : mime === 'image/webp' ? '.webp' : mime === 'image/bmp' ? '.bmp'
+          : mime === 'image/avif' ? '.avif' : '.jpg';
+      const path = join(this.dir, `${hash.slice(0, 24)}${extOut}`);
+      writeFileSync(path, bytes);
+      const record: MediaRecord = {
+        hash, path, url: '', mime, size: bytes.byteLength,
+        firstSeenAt: now, lastSeenAt: now,
+        source: 'import', sourceFile: source,
+      };
+      this.records.set(hash, record);
+      while (this.records.size > MAX_RECORDS) {
+        const oldest = [...this.records.values()].sort((a, b) => a.lastSeenAt.localeCompare(b.lastSeenAt))[0];
+        if (!oldest) break;
+        this.records.delete(oldest.hash);
+      }
+      this.save();
+      return { record, duplicate: false };
     } catch {
       return null;
     }

@@ -690,7 +690,7 @@
     },
     {
       "name": "qq_media_list",
-      "description": "列出最近下载的 QQ 图片/表情包（sha256 短号、路径、已有含义）。",
+      "description": "列出最近下载/导入的图片和表情包（sha256 短号、路径、已有含义），可按含义/文件名搜索。",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -698,8 +698,12 @@
           "limit": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 30,
-            "description": "默认 10"
+            "maximum": 100,
+            "description": "默认 20"
+          },
+          "query": {
+            "type": "string",
+            "description": "可选：按已有含义、文件名或短号筛选"
           }
         },
         "required": []
@@ -707,7 +711,69 @@
       "tags": [
         "read"
       ],
-      "summary": "列出已下载的 QQ 图片/表情。"
+      "summary": "列出已下载/导入的图片和表情。"
+    },
+    {
+      "name": "qq_media_import",
+      "description": "把本地图片或整个目录导入媒体库，按内容 hash 与 QQ 图片自动去重；可选调用本机图片描述程序写初始含义。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "图片文件或目录的本地路径"
+          },
+          "recursive": {
+            "type": "boolean",
+            "description": "目录是否递归，默认 true"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2000,
+            "description": "本次最多导入多少个文件，默认 200"
+          },
+          "caption": {
+            "type": "boolean",
+            "description": "是否调用本地描述程序；省略时按配置"
+          },
+          "caption_limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "description": "本次最多自动描述几张，默认 20"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      },
+      "tags": [
+        "write"
+      ],
+      "summary": "导入本地图片/表情包目录。"
+    },
+    {
+      "name": "qq_media_delete",
+      "description": "从媒体库删除一张图片/表情包，同时删除本地文件。只删除媒体库记录，不影响原始导入目录。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "sha256、短号、路径或 URL"
+          }
+        },
+        "required": [
+          "key"
+        ]
+      },
+      "tags": [
+        "write"
+      ],
+      "summary": "从媒体库删除一张图片。"
     },
     {
       "name": "qq_media_note",
@@ -733,7 +799,7 @@
       "tags": [
         "write"
       ],
-      "summary": "给 QQ 图片/表情写含义。"
+      "summary": "给图片/表情写含义或人工纠错。"
     },
     {
       "name": "qq_view_image",

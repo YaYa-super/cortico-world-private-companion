@@ -5,11 +5,11 @@
  * 与 AstrBot 原插件的差别（详见 README）：这里不接管对话、不碰平台、不做 TTS/生图/识屏，
  * 只管“它自己的生活在动”和“什么时候它想开口”。人格仍由 CONSTITUTION.md 提供。
  */
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import type {
   OutputTap, ToolDef, ToolOutcome, World, WorldHost, WorldWebUiDecl,
 } from 'cortico/core/types.ts';
@@ -36,7 +36,7 @@ import { BiliReadClient } from './channels/bili.ts';
 import { BiliWatchLedger } from './channels/bili-watch.ts';
 import { TogetherBrowser } from './channels/together.ts';
 import { DeepSeekVoice } from './channels/deepseek-voice.ts';
-import { cropSprite, gifFrames, montageImages } from './channels/image-view.ts';
+import { cropSprite, gifFrames, imageForVision, montageImages } from './channels/image-view.ts';
 import { BLOCKED_ACTIONS, findOneBotAction, searchOneBotActions, validateActionParams } from './channels/onebot-catalog.ts';
 import { fetchWeather, weatherTrigger } from './weather.ts';
 import { fetchHolidays, fixedHolidays } from './holidays.ts';
@@ -314,6 +314,10 @@ export class CompanionWorld implements World {
         return this.toolQqSend(args);
       case 'qq_media_list':
         return this.toolQqMediaList(args);
+      case 'qq_media_import':
+        return this.toolQqMediaImport(args);
+      case 'qq_media_delete':
+        return this.toolQqMediaDelete(args);
       case 'qq_media_note':
         return this.toolQqMediaNote(args);
       case 'qq_reply':
@@ -3355,9 +3359,144 @@ export class CompanionWorld implements World {
   }
 
   private async toolQqMediaList(args: Record<string, unknown>): Promise<string> {
-    const list = this.oneBot.mediaList(Math.max(1, Math.min(30, Number(args.limit) || 10)));
-    if (!list.length) return '还没有下载过 QQ 图片。';
-    return list.map((item) => `${item.hash.slice(0, 8)}${item.meaning ? `｜${item.meaning}` : ''}｜${item.path}`).join('\n');
+    const limit = Math.max(1, Math.min(100, Number(args.limit) || 20));
+    const query = trimText(args.query, 80);
+    const list = query ? this.oneBot.mediaSearch(query, limit) : this.oneBot.mediaList(limit);
+    if (!list.length) return query ? `没有找到含「${query}」的图片。` : '媒体库里还没有图片。';
+    return list.map((item) => `${item.hash.slice(0, 8)}${item.meaning ? `｜${item.meaning}` : '｜未描述'}｜${item.path}`).join('\n');
+  }
+
+  private async captionMediaFile(path: string): Promise<{ text: string; error: string }> {
+    const command = String(this.cfg().mediaCaptionCommand || '').trim();
+    if (command) {
+      return await new Promise((resolve) => {
+        execFile(command, [path], { timeout: 30_000, maxBuffer: 1_000_000, windowsHide: true }, (error, stdout) => {
+          if (error) return resolve({ text: '', error: '本地描述命令失败' });
+          resolve({ text: String(stdout || '').trim().split(/\r?\n/)[0]?.slice(0, 200) || '', error: '' });
+        });
+      });
+    }
+    const base = String(this.cfg().mediaCaptionBaseUrl || '').trim().replace(/\/+$/, '');
+    if (!base) return { text: '', error: '没有配置本地视觉接口' };
+    try {
+      let model = String(this.cfg().mediaCaptionModel || '').trim();
+      if (!model) {
+        const models = await fetch(`${base}/models`, { signal: AbortSignal.timeout(5_000) }).then((r) => r.json()) as {
+          data?: Array<{ id?: string; architecture?: { input_modalities?: string[] } }>;
+          models?: Array<{ name?: string; model?: string }>;
+        };
+        const rows = Array.isArray(models.data) ? models.data : [];
+        const vision = rows.find((row) => row.architecture?.input_modalities?.includes('image'));
+        model = String(vision?.id || '');
+        // 没有声明模态的简单 OpenAI 兼容服务，只有唯一模型时才尝试它。
+        if (!model && rows.length === 1 && !rows[0]?.architecture) model = String(rows[0].id || '');
+      }
+      if (!model) return { text: '', error: '本地服务没有支持图片输入的模型（需要 VL/mmproj）' };
+      const prepared = imageForVision(path);
+      const mime = prepared?.mime || (/\.gif$/i.test(path) ? 'image/gif' : /\.webp$/i.test(path) ? 'image/webp'
+        : /\.bmp$/i.test(path) ? 'image/bmp' : /\.avif$/i.test(path) ? 'image/avif' : 'image/jpeg');
+      const bytes = prepared?.bytes || readFileSync(path);
+      const body = {
+        model,
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: '用一句中文描述这张图或表情包表达的意思，不超过 40 个字，不要解释。' },
+            { type: 'image_url', image_url: { url: `data:${mime};base64,${bytes.toString('base64')}` } },
+          ],
+        }],
+        max_tokens: 80,
+        temperature: 0.2,
+        stream: false,
+      };
+      const response = await fetch(`${base}/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(45_000),
+      });
+      if (!response.ok) return { text: '', error: `本地视觉接口 HTTP ${response.status}` };
+      const payload = await response.json() as { choices?: Array<{ message?: { content?: string | Array<{ text?: string }> } }> };
+      const content = payload.choices?.[0]?.message?.content;
+      const text = (typeof content === 'string' ? content : content?.map((part) => part.text || '').join('') || '').trim().slice(0, 200);
+      return text ? { text, error: '' } : { text: '', error: '本地视觉模型没有返回描述' };
+    } catch (error) {
+      return { text: '', error: `本地视觉接口不可用：${error instanceof Error ? error.message : String(error)}` };
+    }
+  }
+
+  private async toolQqMediaImport(args: Record<string, unknown>): Promise<string> {
+    const input = trimText(args.path, 1_000);
+    if (!input) return 'qq_media_import 需要 path。';
+    const root = resolve(input);
+    let rootStat;
+    try { rootStat = statSync(root); } catch { return `找不到路径：${root}`; }
+    const recursive = args.recursive !== false;
+    const limit = Math.max(1, Math.min(2_000, Number(args.limit) || 200));
+    const captionLimit = Math.max(1, Math.min(200, Number(args.caption_limit) || 20));
+    const caption = args.caption === undefined ? this.cfg().mediaAutoCaptionEnabled === true : args.caption === true;
+    const canCaption = caption && Boolean(String(this.cfg().mediaCaptionCommand || '').trim() || String(this.cfg().mediaCaptionBaseUrl || '').trim());
+    const image = /\.(png|jpe?g|jfif|gif|webp|bmp|avif)$/i;
+    const files: string[] = [];
+    const visit = (path: string): void => {
+      if (files.length >= limit) return;
+      const stat = statSync(path);
+      if (stat.isFile()) {
+        if (image.test(path)) files.push(path);
+        return;
+      }
+      if (!stat.isDirectory()) return;
+      let entries;
+      try { entries = readdirSync(path, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name)); } catch { return; }
+      for (const entry of entries) {
+        if (files.length >= limit) return;
+        const child = join(path, entry.name);
+        if (entry.isDirectory()) { if (recursive) visit(child); }
+        else if (entry.isFile() && image.test(entry.name)) files.push(child);
+      }
+    };
+    try { visit(root); } catch (error) { return `读取目录失败：${error instanceof Error ? error.message : String(error)}`; }
+    if (!files.length) return '没有找到可导入的图片（支持 png/jpg/gif/webp/bmp/avif）。';
+    let imported = 0;
+    let duplicates = 0;
+    let skipped = 0;
+    let captioned = 0;
+    let captionFailed = 0;
+    let captionError = '';
+    const keys: string[] = [];
+    for (const file of files) {
+      const result = this.oneBot.mediaImportFile(file);
+      if (!result) { skipped += 1; continue; }
+      if (result.duplicate) duplicates += 1;
+      else { imported += 1; if (keys.length < 10) keys.push(result.record.hash.slice(0, 8)); }
+      if (canCaption && !result.record.meaning && captioned < captionLimit) {
+        const described = await this.captionMediaFile(result.record.path);
+        if (described.text) {
+          this.oneBot.mediaNote(result.record.hash, described.text);
+          captioned += 1;
+        } else {
+          captionFailed += 1;
+          if (!captionError) captionError = described.error;
+        }
+      }
+    }
+    const lines = [
+      `导入完成：新增 ${imported}，库内已有 ${duplicates}，跳过 ${skipped}。`,
+      canCaption
+        ? `自动描述 ${captioned} 张${captionFailed ? `，失败 ${captionFailed} 张` : ''}；之后可用 qq_media_note 人工纠错。`
+        : (caption && !canCaption ? '未配置本地图片描述程序或视觉接口，本次只导入不自动描述。' : '本次未自动描述。'),
+      captioned === 0 && captionFailed > 0 && captionError ? `自动描述未成功：${captionError}` : '',
+      keys.length ? `新图片短号：${keys.join('、')}` : '',
+    ].filter(Boolean);
+    return lines.join('\n');
+  }
+
+  private async toolQqMediaDelete(args: Record<string, unknown>): Promise<string> {
+    const key = trimText(args.key, 300);
+    if (!key) return 'qq_media_delete 需要 key。';
+    const record = this.oneBot.mediaRemove(key);
+    if (!record) return '没有找到这张图。';
+    return `已删除 ${record.hash.slice(0, 8)}${record.meaning ? `（${record.meaning}）` : ''}。`;
   }
 
   private async toolQqMediaNote(args: Record<string, unknown>): Promise<string> {

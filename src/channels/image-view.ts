@@ -33,6 +33,28 @@ function resolveFfmpeg(): string | null {
   return probe.status === 0 ? 'ffmpeg' : null;
 }
 
+/** 给视觉模型准备一张 BMP/WebP/GIF 也能吃的 JPEG；失败返回 null。 */
+export function imageForVision(path: string, maxWidth = 1280): { bytes: Uint8Array; mime: string } | null {
+  const ffmpeg = resolveFfmpeg();
+  if (!ffmpeg) return null;
+  const dir = mkdtempSync(join(tmpdir(), 'coo-vision-'));
+  try {
+    const output = join(dir, 'image.jpg');
+    const result = spawnSync(ffmpeg, [
+      '-hide_banner', '-loglevel', 'error', '-y',
+      '-i', path,
+      '-vf', `scale='min(${maxWidth},iw)':-2`,
+      '-frames:v', '1', '-q:v', '3', output,
+    ], { timeout: 30_000, windowsHide: true });
+    if (result.status !== 0 || !existsSync(output)) return null;
+    return { bytes: new Uint8Array(readFileSync(output)), mime: 'image/jpeg' };
+  } catch {
+    return null;
+  } finally {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+}
+
 export function videoFrames(path: string, maxFrames = 4): ImageBlob[] {
   const ffmpeg = resolveFfmpeg();
   if (!ffmpeg) return [];

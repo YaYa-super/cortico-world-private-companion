@@ -123,6 +123,14 @@ export interface CompanionConfig {
   cognitionIntervalMin: number;
   /** 实验性：contact 意图到期后 hold（默认，不发消息）或 send（过复核后发送）。 */
   cognitionContactMode: 'hold' | 'send';
+  /** 实验性：导入图片时调用本地描述程序生成初始含义。 */
+  mediaAutoCaptionEnabled: boolean;
+  /** 本地图片描述程序；图片路径作为最后一个参数，stdout 作为含义。 */
+  mediaCaptionCommand: string;
+  /** 兼容 OpenAI 的本地视觉接口地址；留空则只用命令。 */
+  mediaCaptionBaseUrl: string;
+  /** 视觉模型 ID；留空自动找支持图片输入的模型。 */
+  mediaCaptionModel: string;
   /** 追加到环境提示词里的个人风格补充。 */
   styleNote: string;
 }
@@ -191,6 +199,10 @@ export const COMPANION_DEFAULTS: CompanionConfig = {
   cognitionMode: 'off',
   cognitionIntervalMin: 10,
   cognitionContactMode: 'hold',
+  mediaAutoCaptionEnabled: false,
+  mediaCaptionCommand: '',
+  mediaCaptionBaseUrl: 'http://127.0.0.1:8081/v1',
+  mediaCaptionModel: '',
   styleNote: '',
 };
 
@@ -585,6 +597,27 @@ export const COMPANION_CONFIG_GROUP: CompanionConfigGroup = {
         description: '每天查询中国法定节假日并产生由头；失败时使用固定公历节日。默认关闭。',
         'x-hot': true,
       },
+      'worlds.companion.mediaAutoCaptionEnabled': {
+        type: 'boolean',
+        title: '导入图片时自动描述',
+        description: '开启后，图片导入时可调用本机的图片描述程序，先写一句初始含义，之后仍可用 qq_media_note 人工纠正。默认关闭。',
+        'x-hot': true,
+      },
+      'worlds.companion.mediaCaptionBaseUrl': {
+        type: 'string',
+        title: '本地视觉接口地址',
+        description: '兼容 OpenAI 的本地视觉服务地址，默认 http://127.0.0.1:8081/v1。模型必须支持图片输入；纯文字模型会跳过自动描述。',
+      },
+      'worlds.companion.mediaCaptionModel': {
+        type: 'string',
+        title: '本地视觉模型',
+        description: '视觉模型 ID；留空时自动从 /v1/models 里找支持图片输入的模型。',
+      },
+      'worlds.companion.mediaCaptionCommand': {
+        type: 'string',
+        title: '本地图片描述程序',
+        description: '本机可执行文件路径；导入图片时会以图片路径作为最后一个参数调用它，取 stdout 第一行作为含义。留空则只导入、不自动描述。',
+      },
       'worlds.companion.cognitionMode': {
         type: 'string',
         title: '背景念头 → 意图',
@@ -647,7 +680,7 @@ const BILI_KEYS = [
   'biliSelfWatchMinMinutes', 'biliMaxVideoMinutes',
   'biliCaptureIntervalSec', 'biliObserveIntervalSec', 'biliObserveCells',
 ];
-const EXPERIMENTAL_KEYS = ['screenEnabled', 'cognitionMode', 'cognitionIntervalMin', 'cognitionContactMode'];
+const EXPERIMENTAL_KEYS = ['screenEnabled', 'cognitionMode', 'cognitionIntervalMin', 'cognitionContactMode', 'mediaAutoCaptionEnabled', 'mediaCaptionCommand', 'mediaCaptionBaseUrl', 'mediaCaptionModel'];
 
 export const COMPANION_CONFIG_GROUPS: CompanionConfigGroup[] = [
   {
