@@ -206,6 +206,17 @@ export class ChannelMediaStore {
   /** 批量导入/描述时由调用方控制落盘频率。 */
   flush(): void { this.save(); }
 
+  clearMeaning(key: string, persist = true): boolean {
+    const needle = key.trim();
+    const record = [...this.records.values()].find((item) => item.hash === needle || item.path === needle);
+    if (!record) return false;
+    record.meaning = undefined;
+    record.needsMeaning = false;
+    if (persist) this.save();
+    return true;
+  }
+
+
   async capture(raw: string, allowAny = false): Promise<MediaRecord | null> {
     let target = publicHttpUrl(raw);
     if (!target) return null;

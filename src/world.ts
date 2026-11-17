@@ -3419,7 +3419,9 @@ export class CompanionWorld implements World {
       const payload = await response.json() as { choices?: Array<{ message?: { content?: string | Array<{ text?: string }> } }> };
       const content = payload.choices?.[0]?.message?.content;
       const text = (typeof content === 'string' ? content : content?.map((part) => part.text || '').join('') || '').trim().slice(0, 200);
-      return text ? { text, error: '' } : { text: '', error: '本地视觉模型没有返回描述' };
+      if (!text) return { text: '', error: '本地视觉模型没有返回描述' };
+      if (text.includes('?')) return { text: '', error: '本地视觉输出乱码（问号），已跳过' };
+      return { text, error: '' };
     } catch (error) {
       return { text: '', error: `本地视觉接口不可用：${error instanceof Error ? error.message : String(error)}` };
     }
