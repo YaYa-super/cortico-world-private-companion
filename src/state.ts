@@ -127,6 +127,10 @@ export interface CompanionState {
   lastProactiveReason: string | null;
   /** 最近一次主动决策的完整拆解（面板用）。 */
   lastProactiveDecision?: ProactiveDecisionRecord | null;
+  /** 上次无人回应时自动看屏幕的时间。 */
+  lastScreenProbeAt?: string | null;
+  /** 上次看屏幕针对的那条用户消息时间，避免同一段沉默反复截图。 */
+  lastScreenProbeUserAt?: string | null;
 }
 
 interface ActivitySeed {
@@ -282,6 +286,8 @@ export function createInitialState(now: Date, tz: string, cfg: CompanionConfig):
     lastTalkAt: null,
     lastProactiveReason: null,
     lastProactiveDecision: null,
+    lastScreenProbeAt: null,
+    lastScreenProbeUserAt: null,
   };
 }
 

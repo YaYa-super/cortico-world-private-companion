@@ -33,6 +33,9 @@ export interface CompanionConfig {
   deepseekKeyFile: string;
   /** 可选：允许角色截屏看桌面（默认关闭）。 */
   screenEnabled: boolean;
+  screenProbeAfterMinutes: number;
+  screenProbeSalience: number;
+  screenProbeIdleLimitSeconds: number;
   /** B站自己看：定时从观看记录/主题里挑一条看并记下。 */
   biliSelfWatchEnabled: boolean;
   biliSelfWatchEveryMinutes: number;
@@ -152,7 +155,10 @@ export const COMPANION_DEFAULTS: CompanionConfig = {
   qqTranscribeVoice: true,
   deepseekBaseUrl: 'https://api.deepseek.com',
   deepseekKeyFile: '',
-  screenEnabled: false,
+  screenEnabled: true,
+  screenProbeAfterMinutes: 10,
+  screenProbeSalience: 0.7,
+  screenProbeIdleLimitSeconds: 120,
   biliSelfWatchEnabled: false,
   biliSelfWatchEveryMinutes: 180,
   biliSelfWatchTopics: '',
@@ -303,8 +309,32 @@ export const COMPANION_CONFIG_GROUP: CompanionConfigGroup = {
       },
       'worlds.companion.screenEnabled': {
         type: 'boolean',
-        title: '允许看屏幕（可选）',
-        description: '允许角色截取当前桌面。默认关闭；只应在明确需要时开启。',
+        title: '看屏幕',
+        description: '允许角色在需要时截取当前桌面。用户超过设定时间未回复时，角色会自动看一次屏幕，判断你是否在电脑前；不需要先有别的主动开口，同一段沉默只尝试一次，不会循环截图。屏幕上有隐私内容时可以关闭。',
+      },
+      'worlds.companion.screenProbeAfterMinutes': {
+        type: 'number',
+        title: '多久没回复后看屏幕（分钟）',
+        description: '用户持续沉默超过这个时间后，角色最多自动看一次桌面。默认 10 分钟。',
+        minimum: 1,
+        maximum: 240,
+        step: 1,
+      },
+      'worlds.companion.screenProbeSalience': {
+        type: 'number',
+        title: '看屏幕由头重要度',
+        description: '这次自动查看桌面的内心由头强度，0–1；越高越容易主动开口。默认 0.7。',
+        minimum: 0,
+        maximum: 1,
+        step: 0.05,
+      },
+      'worlds.companion.screenProbeIdleLimitSeconds': {
+        type: 'number',
+        title: '键鼠空闲多久算不在（秒）',
+        description: '截图前检查 Windows 键鼠空闲时间；超过这个秒数就认为你不在电脑前，不截屏。默认 120 秒。',
+        minimum: 30,
+        maximum: 3600,
+        step: 10,
       },
       'worlds.companion.biliSelfWatchEnabled': {
         type: 'boolean',
@@ -669,7 +699,7 @@ const MEMORY_KEYS = [
   'musingEnabled', 'musingIdleHours', 'musingDailyCap',
   'mergeEnabled', 'mergeSimilarity', 'mindLogLevel',
   'weatherEnabled', 'weatherCity', 'holidayEnabled',
-  'gitmemWorkspace', 'gitmemReadThrough', 'styleNote',
+  'gitmemWorkspace', 'gitmemReadThrough', 'styleNote', 'screenEnabled', 'screenProbeAfterMinutes', 'screenProbeSalience', 'screenProbeIdleLimitSeconds',
 ];
 const QQ_KEYS = ['qqChannelEnabled', 'qqTranscribeVoice'];
 const BILI_KEYS = [
@@ -680,7 +710,7 @@ const BILI_KEYS = [
   'biliSelfWatchMinMinutes', 'biliMaxVideoMinutes',
   'biliCaptureIntervalSec', 'biliObserveIntervalSec', 'biliObserveCells',
 ];
-const EXPERIMENTAL_KEYS = ['screenEnabled', 'cognitionMode', 'cognitionIntervalMin', 'cognitionContactMode', 'mediaAutoCaptionEnabled', 'mediaCaptionCommand', 'mediaCaptionBaseUrl', 'mediaCaptionModel'];
+const EXPERIMENTAL_KEYS = ['cognitionMode', 'cognitionIntervalMin', 'cognitionContactMode', 'mediaAutoCaptionEnabled', 'mediaCaptionCommand', 'mediaCaptionBaseUrl', 'mediaCaptionModel'];
 
 export const COMPANION_CONFIG_GROUPS: CompanionConfigGroup[] = [
   {
@@ -689,7 +719,7 @@ export const COMPANION_CONFIG_GROUPS: CompanionConfigGroup[] = [
     schema: {
       type: 'object',
       title: '记忆',
-      description: '长期记忆、生活节奏、主动联系与角色风格。',
+      description: '长期记忆、生活节奏、主动联系、角色风格与桌面感知。',
       properties: pick(MEMORY_KEYS),
     },
   },

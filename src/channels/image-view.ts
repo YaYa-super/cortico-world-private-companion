@@ -82,6 +82,11 @@ export function videoFrames(path: string, maxFrames = 4): ImageBlob[] {
 }
 
 
+/** 给屏幕探测用：画面有足够亮度和变化才算桌面前有人。 */
+export function imageHasContent(path: string): boolean {
+  return usefulFrame(path);
+}
+
 /** 把若干张同尺寸截图拼成一张图集（2×2 等），返回是否成功。 */
 export function montageImages(paths: string[], output: string, cols = 2, rows = 2): boolean {
   const ffmpeg = resolveFfmpeg();
@@ -108,6 +113,25 @@ export function montageImages(paths: string[], output: string, cols = 2, rows = 
   return result.status === 0 && existsSync(output);
 }
 
+/** 黑帧/纯色帧检测：8×8 灰度均值和方差都太低就认为没有信息。 */
+function usefulFrame(path: string): boolean {
+  const ffmpeg = resolveFfmpeg();
+  if (!ffmpeg) return true;
+  const result = spawnSync(ffmpeg, [
+    '-hide_banner', '-loglevel', 'error', '-i', path,
+    '-vf', 'scale=8:8', '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'gray', '-',
+  ], { timeout: 10_000, windowsHide: true, maxBuffer: 1_000_000 });
+  const bytes = result.stdout;
+  if (result.status !== 0 || !bytes || bytes.length < 64) return true;
+  let sum = 0;
+  for (const value of bytes) sum += value;
+  const mean = sum / bytes.length;
+  let variance = 0;
+  for (const value of bytes) variance += (value - mean) ** 2;
+  variance /= bytes.length;
+  return mean >= 18 && variance >= 8;
+}
+
 export function cropSprite(path: string, cols: number, rows: number, cellW: number, cellH: number, count = 4, seed = ''): ImageBlob[] {
   const ffmpeg = resolveFfmpeg();
   if (!ffmpeg || cols < 1 || rows < 1 || cellW < 1 || cellH < 1) return [];
@@ -115,7 +139,7 @@ export function cropSprite(path: string, cols: number, rows: number, cellW: numb
   try {
     const total = cols * rows;
     const wanted = Math.max(1, Math.min(6, count));
-    // 伪随机选格：避开首尾极端位置，固定种子保证同一条视频不会抽到全边缘帧。
+    // 伪随机打乱候选格；遇到黑帧/纯色帧就跳过，继续抽下一格，直到凑够或没有候选。
     let state = 2166136261;
     for (const ch of `${seed}:${total}:${wanted}`) state = Math.imul(state ^ ch.charCodeAt(0), 16777619) >>> 0;
     const rng = (): number => {
@@ -125,25 +149,22 @@ export function cropSprite(path: string, cols: number, rows: number, cellW: numb
       t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
       return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
     };
-    const picked: number[] = [];
-    if (total <= 2) {
-      for (let index = 0; index < Math.min(wanted, total); index += 1) picked.push(index);
-    } else {
-      const candidates = Array.from({ length: total - 2 }, (_, index) => index + 1);
-      while (picked.length < wanted && candidates.length) {
-        picked.push(candidates.splice(Math.floor(rng() * candidates.length), 1)[0]!);
-      }
-      picked.sort((a, b) => a - b);
+    const candidates = total <= 2
+      ? Array.from({ length: total }, (_, index) => index)
+      : Array.from({ length: total - 2 }, (_, index) => index + 1);
+    for (let i = candidates.length - 1; i > 0; i -= 1) {
+      const j = Math.floor(rng() * (i + 1));
+      [candidates[i], candidates[j]] = [candidates[j]!, candidates[i]!];
     }
     const frames: ImageBlob[] = [];
-    for (let index = 0; index < picked.length; index += 1) {
-      const cell = Math.max(0, Math.min(total - 1, picked[index]));
+    for (const cell of candidates) {
+      if (frames.length >= wanted) break;
       const x = (cell % cols) * cellW;
       const y = Math.floor(cell / cols) * cellH;
-      const out = join(dir, `sprite-${index}.jpg`);
+      const out = join(dir, `sprite-${frames.length}.jpg`);
       const result = spawnSync(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-i', path, '-vf', `crop=${cellW}:${cellH}:${x}:${y}`, '-frames:v', '1', '-y', out], { timeout: 20_000, windowsHide: true });
-      if (result.status !== 0) continue;
-      frames.push({ bytes: readFileSync(out), mime: 'image/jpeg', name: `bili-frame-${index + 1}.jpg`, fallbackText: `[B站画面 ${index + 1}]` });
+      if (result.status !== 0 || !usefulFrame(out)) continue;
+      frames.push({ bytes: readFileSync(out), mime: 'image/jpeg', name: `bili-frame-${frames.length + 1}.jpg`, fallbackText: `[B站画面 ${frames.length + 1}]` });
     }
     return frames;
   } catch {

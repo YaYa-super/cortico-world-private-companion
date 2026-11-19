@@ -5,7 +5,7 @@
 > 把 AstrBot 插件 [`astrbot_plugin_private_companion`](https://github.com/menglimi/astrbot_plugin_private_companion)（中文名同样是「我会永远陪着你」）里
 > **“有自己的生活、会在合适的时候主动开口”** 这套机制，独立实现成 Coopanion 的 World 扩展。
 
-npm：`cortico-world-private-companion` · 当前 `0.8.4`（已发布）。首次升级请先备份 `records.json`/`.bak`/`state.json`。
+npm：`cortico-world-private-companion` · 当前 `0.8.5`（已发布）。首次升级请先备份 `records.json`/`.bak`/`state.json`。
 
 ## 致谢与来源
 
@@ -36,7 +36,7 @@ QQ 和 B站都可以单独关闭；只开记忆也完整可用，打开通道后
 | 每日节目单 | ✅ | 按日期做种子生成几件小事，可被模型或人改写；日程会成为主动开口的由头 |
 | 主动联系 | ✅ | 事件/状态触发、免打扰、每日上限、刚聊完静默、同由头 6h 冷却；由头必须从生活/记忆/状态里推出来，不再用计时器 |
 | 开口效用 | ✅ | `由头值 − 打扰成本 ≥ 阈值`；忙/刚聊/刚主动/未回应/重复计入成本，黏人度可调；**记忆类由头绕过“刚聊过”**；`gate` 可一键回退旧阈值 |
-| QQ / B站通道 | 🧪 | 可选：原生 OneBot 连接/消息/图片/动图抽帧/217 个 action 目录与 `qq_actions`/`qq_call`/接收策略/文件语音/引用回复/群管 UI/`qq_*` 与旧别名工具 + 独立 QQ 面板；B 站（搜索/信息/热评/弹幕/字幕/观看记录/自己看/抽帧/一起看；@/私信后台直推；显式评论/私信回复、点赞/投币/收藏/关注/分享/弹幕/评论操作、图片上传、观察帧分享；是否 @/私信主人由模型判断，账号签名/头像可改）；Screen 截屏可选+ `bili_*` 工具 + 独立 B站面板；登录/字幕/观看记录/一起看后续 |
+| QQ / B站通道 | 🧪 | 可选：原生 OneBot 连接/消息/图片/动图抽帧/217 个 action 目录与 `qq_actions`/`qq_call`/接收策略/文件语音/引用回复/群管 UI/`qq_*` 与旧别名工具 + 独立 QQ 面板；B 站（搜索/信息/热评/弹幕/字幕/观看记录/自己看/抽帧/一起看；@/私信后台直推；显式评论/私信回复、点赞/投币/收藏/关注/分享/弹幕/评论操作、图片上传、观察帧分享；是否 @/私信主人由模型判断，账号签名/头像可改）；Screen 看屏幕（默认开启，可在设置关闭；沉默时会自动看一次桌面）+ `bili_*` 工具 + 独立 B站面板；登录/字幕/观看记录/一起看后续 |
 | 可视化面板 | ✅ | 「记忆」（`life`，只读）：此刻、整行一天时间条（事件带文字标签）、主动联系决策、3D 记忆星图、全库搜索、概览/最近记忆、合并摘要/撤销合并、心理活动筛选、关系与用户模型；旧记忆面板已下线，导入审核继续走 CLI |
 | 用户模型 | ✅ | 从记忆推导「我对他的理解」（身份/偏好/作息/近况/心情/假设），有内容时替代人物摘要；假设带「也许」 |
 | 关系卡 | ✅ | 称呼、关系、生日、备注；支持多 key，模型可读写 |
@@ -61,7 +61,7 @@ QQ 和 B站都可以单独关闭；只开记忆也完整可用，打开通道后
 ```powershell
 cd "D:\Coopanion\data\extensions"
 # package.json → dependencies 加：
-#   "cortico-world-private-companion": "^0.8.4"
+#   "cortico-world-private-companion": "^0.8.5"
 node "D:\Coopanion\resources\app\node_modules\pnpm\bin\pnpm.cjs" install --no-frozen-lockfile
 ```
 

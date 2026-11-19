@@ -11,7 +11,7 @@ import { execFile, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { join, resolve } from 'node:path';
 import type {
-  OutputTap, ToolDef, ToolOutcome, World, WorldHost, WorldWebUiDecl,
+  BlobInput, OutputTap, ToolDef, ToolOutcome, World, WorldHost, WorldWebUiDecl,
 } from 'cortico/core/types.ts';
 import type { WorldContext } from 'cortico/world.ts';
 import { COMPANION_CONFIG_GROUPS, type CompanionConfig } from './config.ts';
@@ -36,7 +36,7 @@ import { BiliReadClient } from './channels/bili.ts';
 import { BiliWatchLedger } from './channels/bili-watch.ts';
 import { TogetherBrowser } from './channels/together.ts';
 import { DeepSeekVoice } from './channels/deepseek-voice.ts';
-import { cropSprite, gifFrames, imageForVision, montageImages } from './channels/image-view.ts';
+import { cropSprite, gifFrames, imageForVision, imageHasContent, montageImages } from './channels/image-view.ts';
 import { BLOCKED_ACTIONS, findOneBotAction, searchOneBotActions, validateActionParams } from './channels/onebot-catalog.ts';
 import { fetchWeather, weatherTrigger } from './weather.ts';
 import { fetchHolidays, fixedHolidays } from './holidays.ts';
@@ -1135,6 +1135,7 @@ export class CompanionWorld implements World {
     type: string,
     text: string,
     trigger: 'piggyback' | 'flush',
+    blobs?: BlobInput[],
   ): Promise<{ cursor: number; delivered: boolean } | null> {
     if (!this.host) return null;
     try {
@@ -1145,6 +1146,7 @@ export class CompanionWorld implements World {
         origin: 'internal',
         text,
         ...(type === 'companion.proactive' ? { meta: { companionWake: this.wakeReason } } : {}),
+        ...(blobs?.length ? { blobs } : {}),
       }, { trigger });
       const delivery = (env as { contextDelivery?: string }).contextDelivery;
       const delivered = !delivery || delivery === 'deliver';
@@ -2137,10 +2139,59 @@ export class CompanionWorld implements World {
     if (this.proactiveInFlight) return false;
     this.proactiveInFlight = true;
     try {
+      if (await this.maybeIdleScreenProbe(now)) return true;
       return await this.maybeProactiveInner(now);
     } finally {
       this.proactiveInFlight = false;
     }
+  }
+
+  /** 用户持续沉默时独立看一次桌面；同一轮用户消息只触发一次，失败也不重试，避免循环。 */
+  private async maybeIdleScreenProbe(now: Date): Promise<boolean> {
+    const cfg = this.cfg();
+    if (!cfg.screenEnabled || !cfg.proactiveEnabled) return false;
+    const lastUserAt = this.probeLastUser(now.getTime());
+    if (lastUserAt === null) return false;
+    const afterMinutes = Math.max(1, Math.min(240, Number(cfg.screenProbeAfterMinutes) || 10));
+    if (now.getTime() - lastUserAt < afterMinutes * 60_000) return false;
+    const p = localParts(now, this.tz());
+    if (this.state.sleeping || inWindow(p.minutes, cfg.quietStart, cfg.quietEnd)) return false;
+    const userIso = new Date(lastUserAt).toISOString();
+    if (this.state.lastScreenProbeUserAt === userIso) return false;
+    // 先落状态再截屏：即使截屏失败或模型不支持图片，也不会在同一段沉默里反复尝试。
+    this.state.lastScreenProbeAt = now.toISOString();
+    this.state.lastScreenProbeUserAt = userIso;
+    this.save(true);
+    let accepts = false;
+    try { accepts = this.host?.modelFacts.accepts('image/png') === true; } catch { accepts = false; }
+    if (!accepts) return false;
+    const idleLimit = Math.max(30, Number(cfg.screenProbeIdleLimitSeconds) || 120);
+    const idleSeconds = this.screenIdleSeconds();
+    if (idleSeconds !== null && idleSeconds > idleLimit) return false;
+    const path = this.captureScreenFile();
+    if (!path || !imageHasContent(path)) return false;
+    let bytes: Uint8Array;
+    try { bytes = readFileSync(path); } catch { return false; }
+    this.wakeReason = '看看他有没有在电脑前';
+    this.mind('trigger', '用户很久没回，自动看一次桌面', {
+      source: 'screen',
+      salience: Number(cfg.screenProbeSalience) || 0.7,
+      afterMinutes,
+    });
+    const pushed = await this.push(
+      'companion.proactive',
+      '他没有回你的消息。这是现在的电脑桌面，先看看他在不在。',
+      'flush',
+      [{ bytes, mime: 'image/png', name: 'desktop.png', fallbackText: '[当前电脑桌面]' }],
+    );
+    if (!pushed?.delivered) return false;
+    this.state.proactiveCount += 1;
+    this.state.proactiveDay = p.date;
+    this.state.lastProactiveAt = now.toISOString();
+    this.state.lastProactiveReason = '自动查看桌面：他很久没回消息';
+    this.state.proactiveDueAt = null;
+    this.save(true);
+    return true;
   }
 
   private async maybeProactiveInner(now: Date): Promise<boolean> {
@@ -3210,8 +3261,24 @@ export class CompanionWorld implements World {
     }).join('\n');
   }
 
-  private async toolCompanionScreen(): Promise<string | ToolOutcome> {
-    if (!this.cfg().screenEnabled) return '看屏幕没有开启（worlds.companion.screenEnabled=false）。';
+  private screenIdleSeconds(): number | null {
+    const script = `Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class IdleCheck {
+  [StructLayout(LayoutKind.Sequential)] public struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
+  [DllImport("user32.dll")] public static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
+  public static uint Seconds() { var info = new LASTINPUTINFO(); info.cbSize=(uint)Marshal.SizeOf(info); if (!GetLastInputInfo(ref info)) return 0; return ((uint)Environment.TickCount - info.dwTime)/1000; }
+}
+"@
+[IdleCheck]::Seconds()`;
+    const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { timeout: 10_000, windowsHide: true });
+    if (result.status !== 0) return null;
+    const value = Number(String(result.stdout ?? '').trim());
+    return Number.isFinite(value) ? value : null;
+  }
+
+  private captureScreenFile(): string | null {
     const dir = join(this.dataDir, 'screen');
     mkdirSync(dir, { recursive: true });
     const path = join(dir, `screen-${Date.now()}.png`);
@@ -3226,7 +3293,13 @@ export class CompanionWorld implements World {
       '$g.Dispose(); $bmp.Dispose()',
     ].join('; ');
     const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { timeout: 20_000, windowsHide: true });
-    if (result.status !== 0 || !existsSync(path)) return '截屏失败（PowerShell 不可用或桌面会话受限）。';
+    return result.status === 0 && existsSync(path) ? path : null;
+  }
+
+  private async toolCompanionScreen(): Promise<string | ToolOutcome> {
+    if (!this.cfg().screenEnabled) return '看屏幕没有开启（worlds.companion.screenEnabled=false）。';
+    const path = this.captureScreenFile();
+    if (!path) return '截屏失败（PowerShell 不可用或桌面会话受限）。';
     const bytes = readFileSync(path);
     let accepts = false;
     try { accepts = this.host?.modelFacts.accepts('image/png') === true; } catch { accepts = false; }
@@ -3392,9 +3465,12 @@ export class CompanionWorld implements World {
         if (!model && rows.length === 1 && !rows[0]?.architecture) model = String(rows[0].id || '');
       }
       if (!model) return { text: '', error: '本地服务没有支持图片输入的模型（需要 VL/mmproj）' };
-      const prepared = imageForVision(path);
-      const mime = prepared?.mime || (/\.gif$/i.test(path) ? 'image/gif' : /\.webp$/i.test(path) ? 'image/webp'
-        : /\.bmp$/i.test(path) ? 'image/bmp' : /\.avif$/i.test(path) ? 'image/avif' : 'image/jpeg');
+      const lower = path.toLowerCase();
+      const direct = /\.(png|jpe?g)$/.test(lower);
+      const prepared = direct ? null : imageForVision(path);
+      const mime = prepared?.mime || (lower.endsWith('.png') ? 'image/png'
+        : /\.gif$/i.test(lower) ? 'image/gif' : /\.webp$/i.test(lower) ? 'image/webp'
+          : /\.bmp$/i.test(lower) ? 'image/bmp' : /\.avif$/i.test(lower) ? 'image/avif' : 'image/jpeg');
       const bytes = prepared?.bytes || readFileSync(path);
       const body = {
         model,
