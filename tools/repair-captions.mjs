@@ -29,7 +29,7 @@ for (let index = 0; index < pending.length; index += 1) {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          model: 'qwen2.5-vl-3b',
+          model: 'qwen3-vl-8b',
           messages: [{
             role: 'user',
             content: [
@@ -37,7 +37,7 @@ for (let index = 0; index < pending.length; index += 1) {
               { type: 'image_url', image_url: { url: `data:${prepared.mime};base64,${data}` } },
             ],
           }],
-          max_tokens: 48,
+          max_tokens: 64,
           temperature: 0.2,
           stream: false,
         }),

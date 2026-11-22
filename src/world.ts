@@ -36,6 +36,8 @@ import { BiliReadClient } from './channels/bili.ts';
 import { BiliWatchLedger } from './channels/bili-watch.ts';
 import { TogetherBrowser } from './channels/together.ts';
 import { DeepSeekVoice } from './channels/deepseek-voice.ts';
+import { askWithWebSearch, formatWebAnswer } from './channels/web-search.ts';
+import { resolveDeepSeekKey } from './channels/web-key.ts';
 import { cropSprite, gifFrames, imageForVision, imageHasContent, montageImages } from './channels/image-view.ts';
 import { BLOCKED_ACTIONS, findOneBotAction, searchOneBotActions, validateActionParams } from './channels/onebot-catalog.ts';
 import { fetchWeather, weatherTrigger } from './weather.ts';
@@ -258,6 +260,7 @@ export class CompanionWorld implements World {
       if ((spec.name.startsWith('qq_') || spec.name.startsWith('onebot_')) && !this.cfg().qqChannelEnabled) return false;
       if (spec.name.startsWith('bili_') && !this.cfg().biliChannelEnabled) return false;
       if (spec.name === 'companion_screen' && !this.cfg().screenEnabled) return false;
+      if (spec.name === 'companion_web' && !this.cfg().webSearchEnabled) return false;
       return true;
     });
     return specs.map((spec) => ({
@@ -282,6 +285,8 @@ export class CompanionWorld implements World {
     switch (name) {
       case 'companion_screen':
         return this.toolCompanionScreen();
+      case 'companion_web':
+        return this.toolCompanionWeb(args);
       case 'companion_state':
         return this.toolState(args);
       case 'companion_agenda':
@@ -417,6 +422,11 @@ export class CompanionWorld implements World {
             ? `记录 ${this.memoryStore.stats().records} · 事件 ${this.memoryStore.stats().events}`
             : '已关闭',
         },
+        ...(cfg.webSearchEnabled ? [{
+          label: '联网',
+          state: 'online' as const,
+          hint: '按需查询，不每句都联网',
+        }] : []),
         ...(cfg.qqChannelEnabled ? [{
           label: 'QQ',
           state: this.oneBot.status().state === 'online' ? 'online'
@@ -2140,10 +2150,48 @@ export class CompanionWorld implements World {
     this.proactiveInFlight = true;
     try {
       if (await this.maybeIdleScreenProbe(now)) return true;
+      if (!this.state.pendingTrigger && await this.maybeHeartbeat(now)) return true;
       return await this.maybeProactiveInner(now);
     } finally {
       this.proactiveInFlight = false;
     }
+  }
+
+  /** 实验性低优先心跳：没有明确由头时，按小时级概率补一次；默认关闭。 */
+  private async maybeHeartbeat(now: Date): Promise<boolean> {
+    const cfg = this.cfg();
+    if (!cfg.heartbeatEnabled || !cfg.proactiveEnabled || !this.host) return false;
+    if (this.state.pendingTrigger) return false;
+    const lastUserAt = this.probeLastUser(now.getTime());
+    if (lastUserAt === null) return false;
+    const minIdle = Math.max(30, Math.min(1440, Number(cfg.heartbeatMinIdleMinutes) || 120));
+    if (now.getTime() - lastUserAt < minIdle * 60_000) return false;
+    const p = localParts(now, this.tz());
+    if (this.state.sleeping || inWindow(p.minutes, cfg.quietStart, cfg.quietEnd)) return false;
+    const cap = Number(cfg.proactiveDailyCap) || 0;
+    if (cap > 0 && this.countToday() >= cap) return false;
+    const last = Date.parse(this.state.lastHeartbeatAt ?? '');
+    // 一小时最多掷一次骰子；失败也落时间，避免每个 tick 反复随机。
+    if (Number.isFinite(last) && now.getTime() - last < 3_600_000) return false;
+    this.state.lastHeartbeatAt = now.toISOString();
+    this.save(true);
+    const chance = Math.max(1, Math.min(50, Number(cfg.heartbeatChancePercent) || 8));
+    if (Math.random() * 100 >= chance) return false;
+    this.wakeReason = '忽然想看看你在不在';
+    const pushed = await this.push('companion.proactive', '忽然想看看你在不在。', 'flush');
+    if (!pushed?.delivered) return false;
+    this.state.proactiveCount += 1;
+    this.state.proactiveDay = p.date;
+    this.state.lastProactiveAt = now.toISOString();
+    this.state.lastProactiveReason = '低优先心跳';
+    this.state.proactiveDueAt = null;
+    this.save(true);
+    this.mind('proactive', '低优先心跳：忽然想看看你在不在', {
+      source: 'heartbeat',
+      chance,
+      idleMinutes: Math.round((now.getTime() - lastUserAt) / 60_000),
+    });
+    return true;
   }
 
   /** 用户持续沉默时独立看一次桌面；同一轮用户消息只触发一次，失败也不重试，避免循环。 */
@@ -3259,6 +3307,28 @@ export class CompanionWorld implements World {
       const voices = message.voicePaths?.length ? `（语音 ${message.voicePaths.length}）` : '';
       return `[${formatLocal(message.at, this.tz()).slice(5, 16)}] [${message.messageId}] ${kind} ${message.nickname}：${quote}${message.text || '[空消息]'}${images}${files}${voices}`;
     }).join('\n');
+  }
+
+  private async toolCompanionWeb(args: Record<string, unknown>): Promise<string> {
+    const cfg = this.cfg();
+    if (!cfg.webSearchEnabled) return '按需联网已关闭。';
+    const question = trimText(args.question, 300);
+    if (!question) return '没给要查的问题。';
+    const { key } = resolveDeepSeekKey(this.ctx.botDir, (name) => this.ctx.secret(name));
+    if (!key) return '联网没配好：没找到 DEEPSEEK_API_KEY。先确认 Coopanion 的 DeepSeek 连接是好的，不要编造答案。';
+    try {
+      const result = await askWithWebSearch(question, {
+        apiKey: key,
+        model: cfg.webSearchModel || 'deepseek-flash',
+        maxSearches: Math.max(1, Math.min(10, Number(cfg.webSearchMaxSearches) || 3)),
+        maxTokens: Math.max(200, Math.min(4000, Number(cfg.webSearchMaxTokens) || 800)),
+        timeoutMs: 120_000,
+      });
+      return formatWebAnswer(result);
+    } catch (error) {
+      const why = error instanceof Error ? error.message : String(error);
+      return `联网没查成：${why}。照实告诉用户，不要凭记忆编一个答案。`;
+    }
   }
 
   private screenIdleSeconds(): number | null {

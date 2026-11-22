@@ -31,6 +31,11 @@ export interface CompanionConfig {
   qqTranscribeVoice: boolean;
   deepseekBaseUrl: string;
   deepseekKeyFile: string;
+  /** 按需联网问答；默认开启，模型只在需要最新信息时调用。 */
+  webSearchEnabled: boolean;
+  webSearchModel: string;
+  webSearchMaxSearches: number;
+  webSearchMaxTokens: number;
   /** 可选：允许角色截屏看桌面（默认关闭）。 */
   screenEnabled: boolean;
   screenProbeAfterMinutes: number;
@@ -134,6 +139,10 @@ export interface CompanionConfig {
   mediaCaptionBaseUrl: string;
   /** 视觉模型 ID；留空自动找支持图片输入的模型。 */
   mediaCaptionModel: string;
+  /** 实验性低优先心跳；默认关闭，只作为现有由头的补充。 */
+  heartbeatEnabled: boolean;
+  heartbeatMinIdleMinutes: number;
+  heartbeatChancePercent: number;
   /** 追加到环境提示词里的个人风格补充。 */
   styleNote: string;
 }
@@ -155,6 +164,10 @@ export const COMPANION_DEFAULTS: CompanionConfig = {
   qqTranscribeVoice: true,
   deepseekBaseUrl: 'https://api.deepseek.com',
   deepseekKeyFile: '',
+  webSearchEnabled: true,
+  webSearchModel: 'deepseek-flash',
+  webSearchMaxSearches: 3,
+  webSearchMaxTokens: 800,
   screenEnabled: true,
   screenProbeAfterMinutes: 10,
   screenProbeSalience: 0.7,
@@ -209,6 +222,9 @@ export const COMPANION_DEFAULTS: CompanionConfig = {
   mediaCaptionCommand: '',
   mediaCaptionBaseUrl: 'http://127.0.0.1:8081/v1',
   mediaCaptionModel: '',
+  heartbeatEnabled: false,
+  heartbeatMinIdleMinutes: 120,
+  heartbeatChancePercent: 8,
   styleNote: '',
 };
 
@@ -486,7 +502,7 @@ export const COMPANION_CONFIG_GROUP: CompanionConfigGroup = {
       'worlds.companion.agendaEnabled': {
         type: 'boolean',
         title: '每日节目单',
-        description: '每天为角色自动安排几件小事；日程会参与状态和主动开口的判断。',
+        description: '每天为角色自动安排几件小事；日程会参与状态和主动开口的判断。关闭后会清空旧节目单，不再按前一天的表继续。',
         'x-hot': true,
       },
       'worlds.companion.energyDecayPerHour': {
@@ -648,6 +664,28 @@ export const COMPANION_CONFIG_GROUP: CompanionConfigGroup = {
         title: '本地图片描述程序',
         description: '本机可执行文件路径；导入图片时会以图片路径作为最后一个参数调用它，取 stdout 第一行作为含义。留空则只导入、不自动描述。',
       },
+      'worlds.companion.heartbeatEnabled': {
+        type: 'boolean',
+        title: '低优先心跳（试验）',
+        description: '在现有由头系统之外，闲置很久时按很低概率自己醒来看看；默认关闭，只作为补充，不会替代原有的主动开口理由。',
+        'x-hot': true,
+      },
+      'worlds.companion.heartbeatMinIdleMinutes': {
+        type: 'number',
+        title: '心跳前最少闲置（分钟）',
+        description: '距离用户最后一条消息至少这么久才考虑低优先心跳；默认 120 分钟。',
+        minimum: 30,
+        maximum: 1440,
+        step: 10,
+      },
+      'worlds.companion.heartbeatChancePercent': {
+        type: 'number',
+        title: '心跳触发概率（%）',
+        description: '满足闲置条件后，每个检查周期触发的概率；默认 8%，只做低频补充。',
+        minimum: 1,
+        maximum: 50,
+        step: 1,
+      },
       'worlds.companion.cognitionMode': {
         type: 'string',
         title: '背景念头 → 意图',
@@ -669,6 +707,33 @@ export const COMPANION_CONFIG_GROUP: CompanionConfigGroup = {
         description: '实验性意图联系；hold 只保留想法，send 才会经过免打扰、额度和未回应检查后发送。',
         enum: ['hold', 'send'],
         'x-hot': true,
+      },
+      'worlds.companion.webSearchEnabled': {
+        type: 'boolean',
+        title: '按需联网',
+        description: '允许角色在需要最新信息、或自己确实拿不准时联网查一次；日常闲聊不查。默认开启。',
+        'x-hot': true,
+      },
+      'worlds.companion.webSearchModel': {
+        type: 'string',
+        title: '联网问答模型',
+        description: '用于服务端联网搜索并综合回答的 DeepSeek 模型，默认 deepseek-flash。',
+      },
+      'worlds.companion.webSearchMaxSearches': {
+        type: 'number',
+        title: '单次最多搜索次数',
+        description: '一次问题最多让服务端搜几次，越多越慢、越贵；默认 3 次。',
+        minimum: 1,
+        maximum: 10,
+        step: 1,
+      },
+      'worlds.companion.webSearchMaxTokens': {
+        type: 'number',
+        title: '联网回答长度上限',
+        description: '联网回答最多生成多少 token；默认 800，足够用一两段话说完。',
+        minimum: 200,
+        maximum: 4000,
+        step: 100,
       },
       'worlds.companion.styleNote': {
         type: 'string',
@@ -700,6 +765,7 @@ const MEMORY_KEYS = [
   'mergeEnabled', 'mergeSimilarity', 'mindLogLevel',
   'weatherEnabled', 'weatherCity', 'holidayEnabled',
   'gitmemWorkspace', 'gitmemReadThrough', 'styleNote', 'screenEnabled', 'screenProbeAfterMinutes', 'screenProbeSalience', 'screenProbeIdleLimitSeconds',
+  'webSearchEnabled', 'webSearchModel', 'webSearchMaxSearches', 'webSearchMaxTokens',
 ];
 const QQ_KEYS = ['qqChannelEnabled', 'qqTranscribeVoice'];
 const BILI_KEYS = [
@@ -710,7 +776,7 @@ const BILI_KEYS = [
   'biliSelfWatchMinMinutes', 'biliMaxVideoMinutes',
   'biliCaptureIntervalSec', 'biliObserveIntervalSec', 'biliObserveCells',
 ];
-const EXPERIMENTAL_KEYS = ['cognitionMode', 'cognitionIntervalMin', 'cognitionContactMode', 'mediaAutoCaptionEnabled', 'mediaCaptionCommand', 'mediaCaptionBaseUrl', 'mediaCaptionModel'];
+const EXPERIMENTAL_KEYS = ['cognitionMode', 'cognitionIntervalMin', 'cognitionContactMode', 'mediaAutoCaptionEnabled', 'mediaCaptionCommand', 'mediaCaptionBaseUrl', 'mediaCaptionModel', 'heartbeatEnabled', 'heartbeatMinIdleMinutes', 'heartbeatChancePercent'];
 
 export const COMPANION_CONFIG_GROUPS: CompanionConfigGroup[] = [
   {

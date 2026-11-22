@@ -330,6 +330,24 @@ export class OneBotChannel {
       : this.call('send_private_msg', { user_id: targetId, message });
   }
 
+  /** 引用消息可能不在最近 100 条里；向 OneBot 反查原消息，取回昵称和正文。 */
+  private async quoteFor(messageId: string, fallback = ''): Promise<string> {
+    const id = messageId.trim();
+    if (!id) return fallback;
+    const local = this.findMessage(id);
+    if (local) return `${local.nickname}：${local.text.slice(0, 200)}`;
+    try {
+      const response = await this.call('get_msg', { message_id: Number(id) || id }, 8_000) as Record<string, unknown>;
+      const data = response.data && typeof response.data === 'object' ? response.data as Record<string, unknown> : {};
+      const parsed = textOfSegments(data.message);
+      const sender = data.sender && typeof data.sender === 'object' ? data.sender as Record<string, unknown> : {};
+      const nickname = asString(sender.card) || asString(sender.nickname) || String(data.user_id ?? '') || '对方';
+      const quotedText = parsed.text.replace(/^\[引用\]\s*/, '').trim();
+      if (quotedText) return `${nickname}：${quotedText.slice(0, 200)}`;
+    } catch { /* 反查失败就保留占位 */ }
+    return fallback;
+  }
+
   findMessage(messageId: string): OneBotMessage | null {
     const id = messageId.trim();
     if (!id) return null;
@@ -471,8 +489,7 @@ export class OneBotChannel {
         if (type === 'message') {
           const message = parseMessagePayload(payload);
           if (!this.accepts(message)) return;
-          const quoted = message.replyTo ? this.messages.find((item) => item.messageId === message.replyTo) : undefined;
-          if (quoted) message.quote = `${quoted.nickname}：${quoted.text.slice(0, 80)}`;
+          if (message.replyTo) message.quote = await this.quoteFor(message.replyTo);
           this.messages.push(message);
           if (this.messages.length > 100) this.messages = this.messages.slice(-100);
           this.pushEvent({ at: this.lastEventAt, type, detail: this.describeEvent(payload, message) });

@@ -56,13 +56,12 @@ test('睡觉时段：精力回升、活动是睡觉', () => {
   assert.ok(state.energy > 40);
 });
 
-test('关闭日程后不再自动生成，但保留已有安排', () => {
+test('关闭日程后不再自动生成，并清掉旧安排', () => {
   const now = new Date('2026-10-29T09:00:00+08:00');
   const state = createInitialState(now, TZ, cfg);
-  const before = state.agenda.length;
   const off = { ...cfg, agendaEnabled: false };
   advance(state, new Date('2026-10-30T09:00:00+08:00'), TZ, off);
-  assert.equal(state.agenda.length, before);
+  assert.equal(state.agenda.length, 0);
 });
 
 test('nextDueAt 遵守间隔与抖动范围', () => {

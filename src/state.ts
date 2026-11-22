@@ -131,6 +131,8 @@ export interface CompanionState {
   lastScreenProbeAt?: string | null;
   /** 上次看屏幕针对的那条用户消息时间，避免同一段沉默反复截图。 */
   lastScreenProbeUserAt?: string | null;
+  /** 上次低优先心跳的检查/触发时间，避免每个 tick 都掷骰子。 */
+  lastHeartbeatAt?: string | null;
 }
 
 interface ActivitySeed {
@@ -288,6 +290,7 @@ export function createInitialState(now: Date, tz: string, cfg: CompanionConfig):
     lastProactiveDecision: null,
     lastScreenProbeAt: null,
     lastScreenProbeUserAt: null,
+    lastHeartbeatAt: null,
   };
 }
 
@@ -334,7 +337,7 @@ export interface AdvanceResult {
 
 /**
  * 按真实时间推进状态。原地改 state 并返回它；调用方负责落盘。
- * `cfg.agendaEnabled` 关掉时保留已有节目单（不删除用户手写的），只是不再自动生成。
+ * `cfg.agendaEnabled` 关掉时清空节目单，并且不再自动生成。
  */
 export function advance(state: CompanionState, now: Date, tz: string, cfg: CompanionConfig): AdvanceResult {
   const p = localParts(now, tz);
@@ -346,9 +349,13 @@ export function advance(state: CompanionState, now: Date, tz: string, cfg: Compa
     state.proactiveCount = 0;
     state.proactiveDueAt = null;
     state.agendaClearedDay = '';
-    if (cfg.agendaEnabled) state.agenda = generateAgenda(p.date);
+    state.agenda = cfg.agendaEnabled ? generateAgenda(p.date) : [];
     changed = true;
     dayChanged = true;
+  } else if (!cfg.agendaEnabled && state.agenda.length) {
+    // 关闭每日节目单后，旧的一天安排不能被带到第二天。
+    state.agenda = [];
+    changed = true;
   } else if (cfg.agendaEnabled && state.agenda.length === 0 && state.agendaClearedDay !== p.date) {
     state.agenda = generateAgenda(p.date);
     changed = true;

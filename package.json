@@ -1,6 +1,6 @@
 {
   "name": "cortico-world-private-companion",
-  "version": "0.8.5",
+  "version": "0.8.6",
   "type": "module",
   "description": "「我会永远陪着你」Coopanion 版：把原作的生活感、主动联系、关系卡与说话分寸独立实现为 World 扩展。内置可迁移记忆，支持本地图库导入与可选视觉自动描述，并打通记忆 × QQ × B站的多功能联动。",
   "keywords": [

@@ -281,7 +281,7 @@ export const TOOL_SPECS: ToolSpec[] = [
       ['target_type', 'target_id', 'text'],
     ),
     tags: ['speak'],
-    usage: '只有确实要主动联系/回复时才发；通道未启用或未连接会返回失败。',
+    usage: '只有确实要主动联系/回复时才发；同一轮不要同时在桌面和 QQ 两边回。通道未启用或未连接会返回失败。',
   },
 
   {
@@ -595,6 +595,19 @@ export const TOOL_SPECS: ToolSpec[] = [
     parameters: obj({}, []),
     tags: ['read'],
     usage: '只在用户明确让你看屏幕/桌面时用；不要频繁截屏。',
+  },
+
+  {
+    name: 'companion_web',
+    description: '联网查一件可能过时或你不知道的事，返回「答案 + 来源」。只在新消息、政策、价格、版本号、某机构最近规定这类问题上用；常识、闲聊、对话里已有的信息不要用。查完用你自己的话简短说，不要念网址列表。',
+    parameters: obj(
+      {
+        question: { type: 'string', description: '要查的问题，用完整的一句话，不要只给关键词' },
+      },
+      ['question'],
+    ),
+    tags: ['read'],
+    usage: '只在真的需要新信息时查一次；日常聊天别用，别为了显得聪明每句都查。',
   },
 
   {
