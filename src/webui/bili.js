@@ -59,6 +59,20 @@ export default {
         const chip = el('span', 'cpb-chip'); const chipDot = el('span', 'cpb-dot'); const chipText = el('b', '', '读取中'); chip.append(chipDot, chipText);
         const togetherBtn = el('button', 'cpb-btn primary', '一起看'); togetherBtn.type = 'button'; head.append(chip, togetherBtn);
         app.append(head);
+        const loginBtn = el('button', 'cpb-btn', '扫码登录');
+        loginBtn.type = 'button';
+        head.insertBefore(loginBtn, togetherBtn);
+        const loginCard = el('div', 'cpb-card');
+        loginCard.hidden = true;
+        const qr = el('img');
+        qr.alt = '用哔哩哔哩客户端扫描此二维码';
+        qr.width = 224;
+        qr.height = 224;
+        qr.hidden = true;
+        const loginMsg = el('div', 'cpb-note');
+        loginMsg.setAttribute('role', 'status');
+        loginCard.append(qr, loginMsg);
+        app.append(loginCard);
         const browse = el('div', 'cpb-panel on');
         app.append(browse);
         root.append(app);
@@ -185,9 +199,62 @@ export default {
             const result = await ctx.invoke('status', []); const nav = result.nav || {};
             chipText.textContent = nav.loggedIn ? nav.name || '已登录' : '未登录';
             chipDot.className = `cpb-dot ${nav.loggedIn ? 'on' : ''}`;
+            loginBtn.hidden = Boolean(nav.loggedIn || result.manualCookie);
+            if (result.manualCookie && !nav.loggedIn) {
+              loginCard.hidden = false;
+              loginMsg.textContent = '已指定 Cookie 文件。请检查登录态，或在设置中清空文件路径以使用扫码登录。';
+            }
           } catch { chipText.textContent = '读取失败'; chipDot.className = 'cpb-dot bad'; }
         };
 
+        let attempt = '';
+        let polling = false;
+        function endAttempt(message) {
+          attempt = '';
+          qr.hidden = true;
+          qr.removeAttribute('src');
+          loginMsg.textContent = message;
+          loginBtn.textContent = '重新获取二维码';
+        }
+        loginBtn.addEventListener('click', async () => {
+          attempt = '';
+          loginCard.hidden = false;
+          qr.hidden = true;
+          loginBtn.disabled = true;
+          loginMsg.textContent = '正在获取二维码…';
+          try {
+            const result = await ctx.invoke('login_start', []);
+            qr.src = result.image;
+            qr.hidden = false;
+            attempt = result.attempt;
+            loginMsg.textContent = '用手机哔哩哔哩 App 扫码，再在手机上确认登录。';
+            loginBtn.textContent = '更换二维码';
+          } catch (error) {
+            endAttempt('获取失败：' + (error.message || error));
+          } finally {
+            loginBtn.disabled = false;
+          }
+        });
+        const pollLogin = async () => {
+          if (!attempt || polling) return;
+          const id = attempt;
+          polling = true;
+          try {
+            const result = await ctx.invoke('login_poll', [id]);
+            if (id !== attempt) return;
+            if (result.state === 'expired') endAttempt('二维码已过期，请重新获取。');
+            if (result.state === 'confirm') loginMsg.textContent = '已扫码，请在手机上确认登录。';
+            if (result.state === 'done') {
+              endAttempt('登录已保存。');
+              await loadStatus();
+            }
+          } catch (error) {
+            if (id === attempt) endAttempt('登录检查失败：' + (error.message || error));
+          } finally {
+            polling = false;
+          }
+        };
+        ctx.interval(() => { void pollLogin(); }, 2500);
         await Promise.all([loadStatus(), loadObservation()]);
         ctx.interval(() => { void loadObservation(); }, 5_000);
       },

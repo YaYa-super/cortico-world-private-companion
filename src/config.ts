@@ -139,6 +139,8 @@ export interface CompanionConfig {
   mediaCaptionBaseUrl: string;
   /** 视觉模型 ID；留空自动找支持图片输入的模型。 */
   mediaCaptionModel: string;
+  /** 优先用本地视觉识别 QQ 图片和表情包。 */
+  preferLocalMediaVision: boolean;
   /** 实验性低优先心跳；默认关闭，只作为现有由头的补充。 */
   heartbeatEnabled: boolean;
   heartbeatMinIdleMinutes: number;
@@ -222,6 +224,7 @@ export const COMPANION_DEFAULTS: CompanionConfig = {
   mediaCaptionCommand: '',
   mediaCaptionBaseUrl: 'http://127.0.0.1:8081/v1',
   mediaCaptionModel: '',
+  preferLocalMediaVision: false,
   heartbeatEnabled: false,
   heartbeatMinIdleMinutes: 120,
   heartbeatChancePercent: 8,
@@ -263,19 +266,19 @@ export const COMPANION_CONFIG_GROUP: CompanionConfigGroup = {
       'worlds.companion.qqChannelEnabled': {
         type: 'boolean',
         title: 'QQ 通道（可选）',
-        description: '启用后显示 QQ 面板，并由本扩展直接连接 OneBot。默认关闭，避免与已安装的 QQ 扩展重复连接。',
+        description: '开启后进入「QQ」页签，在「连接设置」填写 OneBot 正向 WebSocket 地址和 Token。若尚未看到页签，请刷新管理页面。',
         'x-hot': true,
       },
       'worlds.companion.biliChannelEnabled': {
         type: 'boolean',
         title: 'B站通道（可选）',
-        description: '启用后显示 B站面板，包含浏览、通知、账号与一起看。默认关闭，避免与已有的 B站扩展冲突。',
+        description: '开启后进入「B站」页签，点击「扫码登录」绑定账号。若尚未看到页签，请刷新管理页面。',
         'x-hot': true,
       },
       'worlds.companion.biliCookieFile': {
         type: 'string',
         title: 'B站 Cookie 文件',
-        description: 'B站登录态文件路径。留空时读取旧陪看扩展的 cookies.json，也可指向自己的 Cookie 文件。',
+        description: '可选。首次使用可留空，在 B站面板扫码登录。指定文件时优先使用该文件，重启后读取。',
         'x-path': { kind: 'file', extensions: ['json'] },
       },
       'worlds.companion.biliInboxPushEnabled': {
@@ -659,6 +662,12 @@ export const COMPANION_CONFIG_GROUP: CompanionConfigGroup = {
         title: '本地视觉模型',
         description: '视觉模型 ID；留空时自动从 /v1/models 里找支持图片输入的模型。',
       },
+      'worlds.companion.preferLocalMediaVision': {
+        type: 'boolean',
+        title: 'QQ 表情包和图片优先使用本地视觉模型',
+        description: '开启后，先用本地视觉生成简短描述，成功时只把文字交给主模型，可减少图片 token 消耗。速度和识别效果取决于电脑配置和模型能力。识别失败时按原方式给主模型看图。',
+        'x-hot': true,
+      },
       'worlds.companion.mediaCaptionCommand': {
         type: 'string',
         title: '本地图片描述程序',
@@ -776,7 +785,7 @@ const BILI_KEYS = [
   'biliSelfWatchMinMinutes', 'biliMaxVideoMinutes',
   'biliCaptureIntervalSec', 'biliObserveIntervalSec', 'biliObserveCells',
 ];
-const EXPERIMENTAL_KEYS = ['cognitionMode', 'cognitionIntervalMin', 'cognitionContactMode', 'mediaAutoCaptionEnabled', 'mediaCaptionCommand', 'mediaCaptionBaseUrl', 'mediaCaptionModel', 'heartbeatEnabled', 'heartbeatMinIdleMinutes', 'heartbeatChancePercent'];
+const EXPERIMENTAL_KEYS = ['cognitionMode', 'cognitionIntervalMin', 'cognitionContactMode', 'mediaAutoCaptionEnabled', 'mediaCaptionCommand', 'mediaCaptionBaseUrl', 'mediaCaptionModel', 'preferLocalMediaVision', 'heartbeatEnabled', 'heartbeatMinIdleMinutes', 'heartbeatChancePercent'];
 
 export const COMPANION_CONFIG_GROUPS: CompanionConfigGroup[] = [
   {

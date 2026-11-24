@@ -30,8 +30,10 @@ import { deriveUserModel, renderUserModel } from './user-model.ts';
 import { MindLog, type MindType } from './mind.ts';
 import { MEMORY_KINDS, MemoryStore, scopeKey, type MemoryKind, type MemoryRecord } from './memory-store.ts';
 import { isHumanEvent, scopeOfEvent } from './event-filter.ts';
+import type { MediaRecord } from './channels/media-store.ts';
 import { OneBotChannel } from './channels/onebot.ts';
 import { BILI_READONLY_DESIGN } from './channels/bili-read.ts';
+import { BiliLogin } from './channels/bili-login.ts';
 import { BiliReadClient } from './channels/bili.ts';
 import { BiliWatchLedger } from './channels/bili-watch.ts';
 import { TogetherBrowser } from './channels/together.ts';
@@ -109,7 +111,9 @@ export class CompanionWorld implements World {
   private readonly memoryStore: MemoryStore;
   private readonly mindLog: MindLog;
   private readonly oneBot: OneBotChannel;
-  private readonly bili: BiliReadClient;
+  private bili: BiliReadClient;
+  private readonly biliLogin = new BiliLogin();
+  private readonly biliLoginFile: string;
   private readonly biliWatch: BiliWatchLedger;
   private readonly together: TogetherBrowser;
   private readonly voice: DeepSeekVoice;
@@ -159,7 +163,9 @@ export class CompanionWorld implements World {
     const base = typeof ctx.dataDir === 'string' && ctx.dataDir ? ctx.dataDir : '.';
     this.dataDir = join(base, 'private-companion');
     this.oneBot = new OneBotChannel({ dataDir: this.dataDir, botDir: ctx.botDir });
-    const biliCookie = this.cfg().biliCookieFile || join(ctx.botDir, 'data', 'bili-video-pro', 'cookies.json');
+    this.biliLoginFile = join(this.dataDir, 'bili', 'cookies.json');
+    const biliCookie = this.cfg().biliCookieFile || (existsSync(this.biliLoginFile)
+      ? this.biliLoginFile : join(ctx.botDir, 'data', 'bili-video-pro', 'cookies.json'));
     this.bili = new BiliReadClient({ cookieFile: biliCookie });
     this.biliWatch = new BiliWatchLedger(join(this.dataDir, 'bili', 'watch-ledger.jsonl'));
     try {
@@ -586,10 +592,17 @@ export class CompanionWorld implements World {
   private async invokeBiliPanel(method: string, args: unknown[]): Promise<unknown> {
     const list = Array.isArray(args) ? args : [];
     if (!this.cfg().biliChannelEnabled) throw new Error('B站通道未启用');
+    if (method === 'login_start' || method === 'login_poll') {
+      if (this.cfg().biliCookieFile) throw new Error('当前使用设置中指定的 Cookie 文件。要扫码登录，请先清空该路径。');
+      if (method === 'login_start') return this.biliLogin.start();
+      const result = await this.biliLogin.poll(list[0], this.biliLoginFile);
+      if (result.state === 'done') this.bili = new BiliReadClient({ cookieFile: this.biliLoginFile });
+      return result;
+    }
     if (method === 'status' || method === 'refresh' || method === 'design') {
       let nav = { loggedIn: false, name: '', mid: '' };
       try { nav = await this.bili.nav(); } catch { /* 未登录/风控时保留匿名状态 */ }
-      return { design: BILI_READONLY_DESIGN, total: BILI_READONLY_DESIGN.capabilities.length, nav };
+      return { design: BILI_READONLY_DESIGN, total: BILI_READONLY_DESIGN.capabilities.length, manualCookie: Boolean(this.cfg().biliCookieFile), nav };
     }
     if (method === 'history') {
       return { history: await this.bili.history(Number(list[0]) || 20) };
@@ -1044,6 +1057,7 @@ export class CompanionWorld implements World {
   }
 
   async stop(): Promise<void> {
+    this.biliLogin.cancel();
     this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
@@ -2496,6 +2510,22 @@ export class CompanionWorld implements World {
     return `${bits.join('；')}。`;
   }
 
+  private readonly localMediaCaptions = new Map<string, Promise<string>>();
+
+  private async localMediaMeaning(record: MediaRecord): Promise<string> {
+    if (record.meaning) return record.meaning;
+    if (!this.cfg().preferLocalMediaVision) return '';
+    const pending = this.localMediaCaptions.get(record.hash);
+    if (pending) return pending;
+    const caption = this.captionMediaFile(record.path, record.mime === 'image/gif').then(({ text }) => {
+      const current = this.oneBot.mediaGet(record.hash);
+      if (!current || current.meaning) return current?.meaning || '';
+      return text ? this.oneBot.mediaNote(record.hash, text)?.meaning || '' : '';
+    }).finally(() => this.localMediaCaptions.delete(record.hash));
+    this.localMediaCaptions.set(record.hash, caption);
+    return caption;
+  }
+
   private async remindPendingQqMedia(now: Date): Promise<void> {
     if (!this.host || !this.cfg().qqChannelEnabled) return;
     if (now.getTime() - this.lastMediaReminderAt < 30 * 60_000) return;
@@ -2505,6 +2535,7 @@ export class CompanionWorld implements World {
     const blobs: Array<{ bytes: Uint8Array; mime: string; name: string; fallbackText: string }> = [];
     const keys: string[] = [];
     for (const record of pending) {
+      if (await this.localMediaMeaning(record)) continue;
       const bytes = this.oneBot.mediaRead(record);
       if (!bytes) continue;
       const ext = record.mime.split('/')[1] || 'img';
@@ -2550,7 +2581,8 @@ export class CompanionWorld implements World {
     for (const key of message.imageKeys) {
       const record = this.oneBot.mediaGet(key);
       if (!record) { imageNotes.push(key.slice(0, 8)); continue; }
-      if (record.meaning) { imageNotes.push(`${key.slice(0, 8)}=${record.meaning}`); continue; }
+      const meaning = await this.localMediaMeaning(record);
+      if (meaning) { imageNotes.push(`${key.slice(0, 8)}=${meaning}`); continue; }
       if (record.viewedAt) { imageNotes.push(`${key.slice(0, 8)}（看过未记含义）`); continue; }
       const bytes = this.oneBot.mediaRead(record);
       if (!bytes) { imageNotes.push(key.slice(0, 8)); continue; }
@@ -3479,7 +3511,8 @@ public static class IdleCheck {
     if (!key) return 'qq_view_image 需要 key。';
     const record = this.oneBot.mediaGet(key);
     if (!record) return '没有找到这张图；先用 qq_recent 看图片短号。';
-    if (record.meaning) return `这张图已经有含义：${record.meaning}。不再返回图片，直接按这个意思用。`;
+    const meaning = await this.localMediaMeaning(record);
+    if (meaning) return `这张图已经有含义：${meaning}。不再返回图片，直接按这个意思用。`;
     if (record.viewedAt) return '这张图之前已经看过但还没记含义；不再重复给图，请用 qq_media_note 补一句，或者跳过。';
     const bytes = this.oneBot.mediaRead(record);
     if (!bytes) return '图片文件不在了；可以重新下载后再看。';
@@ -3509,7 +3542,7 @@ public static class IdleCheck {
     return list.map((item) => `${item.hash.slice(0, 8)}${item.meaning ? `｜${item.meaning}` : '｜未描述'}｜${item.path}`).join('\n');
   }
 
-  private async captionMediaFile(path: string): Promise<{ text: string; error: string }> {
+  private async captionMediaFile(path: string, sampleAnimation = false): Promise<{ text: string; error: string }> {
     const command = String(this.cfg().mediaCaptionCommand || '').trim();
     if (command) {
       return await new Promise((resolve) => {
@@ -3537,18 +3570,19 @@ public static class IdleCheck {
       if (!model) return { text: '', error: '本地服务没有支持图片输入的模型（需要 VL/mmproj）' };
       const lower = path.toLowerCase();
       const direct = /\.(png|jpe?g)$/.test(lower);
-      const prepared = direct ? null : imageForVision(path);
+      const frames = sampleAnimation ? gifFrames(path, 4) : [];
+      const prepared = direct || frames.length ? null : imageForVision(path);
       const mime = prepared?.mime || (lower.endsWith('.png') ? 'image/png'
         : /\.gif$/i.test(lower) ? 'image/gif' : /\.webp$/i.test(lower) ? 'image/webp'
           : /\.bmp$/i.test(lower) ? 'image/bmp' : /\.avif$/i.test(lower) ? 'image/avif' : 'image/jpeg');
-      const bytes = prepared?.bytes || readFileSync(path);
+      const images = frames.length ? frames : [{ mime, bytes: prepared?.bytes || readFileSync(path) }];
       const body = {
         model,
         messages: [{
           role: 'user',
           content: [
             { type: 'text', text: '用一句中文描述这张图或表情包表达的意思，不超过 40 个字，不要解释。' },
-            { type: 'image_url', image_url: { url: `data:${mime};base64,${bytes.toString('base64')}` } },
+            ...images.map(image => ({ type: 'image_url', image_url: { url: `data:${image.mime};base64,${Buffer.from(image.bytes).toString('base64')}` } })),
           ],
         }],
         max_tokens: 80,

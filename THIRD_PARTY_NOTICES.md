@@ -14,6 +14,7 @@ No third-party extension code is loaded at runtime by this package.
 
 ## Runtime dependencies
 
+- `qrcode` — MIT License. Generates Bilibili login QR codes locally.
 - `ws` — MIT License. WebSocket client used by the native OneBot channel.
 - `puppeteer-core` — Apache License 2.0. Controls the local browser for Bilibili watch-together; it does not download a browser.
 - `@ffmpeg-installer/ffmpeg` — installer is MIT-licensed; the bundled FFmpeg binary is subject to FFmpeg's LGPL/GPL licensing terms (see the package and FFmpeg distribution for details). Used for montage/sprite/frame extraction.

@@ -106,7 +106,8 @@ export default {
 
         const settingsCard = el('div', 'cpq-card');
         const settingsLbl = el('div', 'cpq-lbl');
-        settingsLbl.append(el('b', '', '连接设置'), el('span', '', '高级'));
+        settingsLbl.append(el('b', '', '连接设置'));
+        const setupHint = el('p', '', '在 SnowLuma 等 OneBot 程序中开启正向 WebSocket 服务端，将它的地址和 Token 填在这里。');
         const settings = el('div', 'cpq-settings');
         const urlField = el('div', 'cpq-field full');
         const urlInput = el('input', 'cpq-input');
@@ -128,7 +129,7 @@ export default {
         const saveBtn = el('button', 'cpq-btn primary cpq-save', '保存设置');
         saveBtn.type = 'button';
         const msg = el('div', 'cpq-msg');
-        settingsCard.append(settingsLbl, settings, saveBtn, msg);
+        settingsCard.append(settingsLbl, setupHint, settings, saveBtn, msg);
 
         const groupCard = el('div', 'cpq-card');
         const groupLbl = el('div', 'cpq-lbl');
@@ -171,9 +172,20 @@ export default {
           row.append(el('time', '', `${fmtTime(time)}${label ? ` · ${label}` : ''}`), doc.createTextNode(text));
           return row;
         };
+        const updateField = (input, saved) => {
+          if (input.value === input.defaultValue || input.value === saved) {
+            input.value = saved;
+            input.defaultValue = saved;
+          }
+        };
+        let firstStatus = true;
         const render = () => {
           if (!snapshot) return;
           const status = snapshot.status || {};
+          if (firstStatus) {
+            if (status.state !== 'online') grid.prepend(settingsCard);
+            firstStatus = false;
+          }
           const [label, tone] = stateInfo(status.state);
           chipText.textContent = label;
           dot.className = `cpq-dot ${tone}`;
@@ -200,9 +212,9 @@ export default {
           for (const e of history) historyBox.append(listItem(e.at, e.type, e.detail));
           historyBtn.textContent = showHistory ? '收起' : `查看全部（${history.length}）`;
           historyBox.style.display = showHistory ? 'flex' : 'none';
-          if (doc.activeElement !== urlInput) urlInput.value = snapshot.config?.wsUrl || status.wsUrl || '';
-          if (doc.activeElement !== receiveInput) receiveInput.value = snapshot.config?.receive || 'private:*';
-          if (doc.activeElement !== sttInput) sttInput.value = snapshot.config?.sttCommand || '';
+          updateField(urlInput, snapshot.config?.wsUrl || status.wsUrl || '');
+          updateField(receiveInput, snapshot.config?.receive || 'private:*');
+          updateField(sttInput, snapshot.config?.sttCommand || '');
           connectBtn.disabled = busy; disconnectBtn.disabled = busy; saveBtn.disabled = busy;
           if (status.lastError) showMsg(status.lastError, true);
         };
