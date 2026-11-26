@@ -535,6 +535,22 @@ export const TOOL_SPECS: ToolSpec[] = [
   },
 
   {
+    name: 'bili_watch_review',
+    description: '处理一次自己看。决定何时跟主人聊，并独立选择点赞、投一枚币、评论及评论里是否 @ 主人。可全部跳过。',
+    parameters: obj({
+      watch_id: { type: 'string', description: '自己看观察里的观看编号' },
+      decision: { type: 'string', enum: ['now', 'later', 'private'], description: '现在聊、延后聊、这次不跟主人聊' },
+      like: { type: 'boolean', description: '是否点赞，已点赞跳过' },
+      coin: { type: 'boolean', description: '是否投一枚币，已投币跳过' },
+      comment: { type: 'string', description: '评论正文，留空跳过；同视频已评论时跳过' },
+      mention_owner: { type: 'boolean', description: '仅本次要发评论时决定是否 @ 主人，默认否' },
+      delay_minutes: { type: 'integer', minimum: 15, maximum: 360, description: 'later 才用，默认 60 分钟' },
+      thought: { type: 'string', description: '想分享时留下的具体感受，之后重新决定怎么说' },
+    }, ['watch_id', 'decision']),
+    tags: ['write'],
+    usage: '收到自己看观察时调用一次，逐项决定点赞、投币和评论。分享仍受免打扰和频率规则约束。',
+  },
+  {
     name: 'bili_frames',
     description: '下载 B 站视频并用 ffmpeg 抽最多 4 帧，给模型看画面；只读，不保留视频。',
     parameters: obj(
@@ -612,7 +628,7 @@ export const TOOL_SPECS: ToolSpec[] = [
 
   {
     name: 'bili_comment_reply',
-    description: '在 B站视频下发评论或回复某条评论；会自动 @ 主人账号。需要 biliReplyEnabled + confirm。',
+    description: '在 B站视频下发评论或回复某条评论。是否 @ 主人可选，同视频已发过顶层评论则跳过。需要 biliReplyEnabled + confirm。',
     parameters: obj(
       {
         bvid: { type: 'string', description: 'BV 号' },

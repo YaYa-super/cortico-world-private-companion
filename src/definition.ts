@@ -81,8 +81,8 @@ const EVENTS: EventDescribe[] = [
   {
     type: 'bili.watch',
     description: {
-      zh: 'B站自己看/一起看留下的观看事件，可成为主动分享的由头。',
-      en: 'A Bilibili watch event that can seed a proactive share.',
+      zh: 'B站观看观察：字幕、热评和可用画面。自己看之后，角色决定聊天时机并选择是否点赞、投币或评论。',
+      en: 'Bilibili watch observation with available subtitles, comments and frames. After solo watching, the character decides whether to share, like, give a coin or comment.',
     },
     trigger: 'debounce',
   },

@@ -358,19 +358,19 @@ export const COMPANION_CONFIG_GROUP: CompanionConfigGroup = {
       'worlds.companion.biliSelfWatchEnabled': {
         type: 'boolean',
         title: 'B站自己看',
-        description: '按设定间隔从观看记录或兴趣主题中挑视频，读取信息、字幕和评论后记录观看账。',
+        description: '鱼鱼空闲时从新片和旧片中挑一条自己看，之后由她决定要不要分享。',
       },
       'worlds.companion.biliSelfWatchEveryMinutes': {
         type: 'integer',
         title: '自己看间隔（分钟）',
         minimum: 30,
         maximum: 1440,
-        description: '两次自己看之间的最短间隔；过短会频繁请求 B站并增加消耗。',
+        description: '两次自己看之间的最短间隔。到时间后，鱼鱼会等自己有空再看。',
       },
       'worlds.companion.biliSelfWatchTopics': {
         type: 'string',
         title: '自己看主题',
-        description: '观看记录为空时按这些关键词找视频；留空则不自动开始自己看。',
+        description: '找新视频时优先搜索这些兴趣关键词，找不到合适的视频或留空时从热门里挑。',
       },
       'worlds.companion.biliSelfWatchTextDailyLimit': {
         type: 'integer',

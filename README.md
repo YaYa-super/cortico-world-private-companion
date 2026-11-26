@@ -5,7 +5,7 @@
 > 把 AstrBot 插件 [`astrbot_plugin_private_companion`](https://github.com/menglimi/astrbot_plugin_private_companion)（中文名同样是「我会永远陪着你」）里
 > **“有自己的生活、会在合适的时候主动开口”** 这套机制，独立实现成 Coopanion 的 World 扩展。
 
-npm：`cortico-world-private-companion` · 当前 `0.8.7`（已发布）。首次升级请先备份 `records.json`/`.bak`/`state.json`。
+npm：`cortico-world-private-companion` · 当前 `0.8.8`（已发布）。首次升级请先备份 `records.json`/`.bak`/`state.json`。
 
 ## 致谢与来源
 
@@ -31,10 +31,14 @@ npm：`cortico-world-private-companion` · 当前 `0.8.7`（已发布）。首�
 三个功能不是并排放，而是尽量互相补位、共享上下文：
 
 - **QQ → 记忆**：聊天、图片含义、文件和语音转写进入同一套记忆；群里没点名的消息会成为主动开口的由头。
-- **B站 → 记忆**：自己看、一起看、字幕/热评和观看账会留下 episode；刚看完的视频也会成为“想分享”的由头。
+- **B站 → 记忆**：自己看、一起看、字幕和热评会留下 episode。鱼鱼看完后可以决定现在聊、晚点聊，或者自己留着。
 - **B站私信 → 上下文**：分享会带 BV、标题和链接；主人私信会明确标注“主人本人”，不会和系统通知混淆。
 - **主动开口**：QQ 群聊、B站观看、记忆里的未完成话头、日程/天气/节日一起进入效用判断，决定“现在值不值得开口”，而不是随机问候。
 - **模型跨通道做事**：在 QQ 里看到 B站链接可以转去观看/一起看，在 B站看完也可以回到 QQ 分享；通道是工具，不抢对话。
+
+开启「B站自己看」后，鱼鱼在清醒、有精力、没在忙，且距离上次聊天至少 30 分钟时才有机会选片。每次选片，新片和重看各有一半机会，片源不足时用另一边补。新片从兴趣搜索或热门里挑，重看用 B 站历史和鱼鱼自己的观看账，近期重看有 24 小时间隔。原有的观看间隔和文字、画面额度继续生效。鱼鱼可以在主动联系关闭时自己看。她选择现在分享或延后分享时，开口仍遵守免打扰和频率规则。
+
+看完后鱼鱼也会考虑是否点赞、投一枚币或留条评论。决定评论后，她再判断要不要 @ 主人。点赞、投币和顶层评论都按账号与视频去重，仍使用现有互动开关和评论额度。
 
 QQ 和 B站都可以单独关闭；只开记忆也完整可用，打开通道后才多出这层联动。
 
@@ -71,7 +75,7 @@ QQ 和 B站都可以单独关闭；只开记忆也完整可用，打开通道后
 ```powershell
 cd "D:\Coopanion\data\extensions"
 # package.json → dependencies 加：
-#   "cortico-world-private-companion": "^0.8.7"
+#   "cortico-world-private-companion": "^0.8.8"
 node "D:\Coopanion\resources\app\node_modules\pnpm\bin\pnpm.cjs" install --no-frozen-lockfile
 ```
 

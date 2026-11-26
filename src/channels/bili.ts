@@ -68,6 +68,7 @@ export interface BiliDmMessage {
 }
 
 export interface BiliComment {
+  mid: string;
   user: string;
   message: string;
   like: number;
@@ -113,6 +114,8 @@ export class BiliReadClient {
     this.cookieFile = opts.cookieFile || '';
     this.loadCookieFile();
   }
+
+  get accountUid(): string { return this.selfUid; }
 
   private loadCookieFile(): void {
     if (!this.cookieFile || !existsSync(this.cookieFile)) return;
@@ -269,6 +272,27 @@ export class BiliReadClient {
   }
 
 
+  async hasLiked(bvid: string): Promise<boolean> {
+    const { data } = await this.json('https://api.bilibili.com/x/web-interface/archive/has/like?bvid=' + encodeURIComponent(bvid));
+    if (data !== 0 && data !== 1) throw new Error('B站未返回点赞状态');
+    return data === 1;
+  }
+
+  async coinsForVideo(bvid: string): Promise<number> {
+    const { data } = await this.json('https://api.bilibili.com/x/web-interface/archive/coins?bvid=' + encodeURIComponent(bvid));
+    const multiply = (data as { multiply?: unknown } | null)?.multiply;
+    if (typeof multiply !== 'number' || !Number.isFinite(multiply) || multiply < 0) throw new Error('B站未返回投币状态');
+    return multiply;
+  }
+
+  private async readInteractionResponse(response: Response): Promise<Record<string, unknown>> {
+    const payload = await response.json().catch(() => null) as Record<string, unknown> | null;
+    if (response.status >= 500 || response.status === 408 || typeof payload?.code !== 'number') {
+      throw new Error(`B站互动结果未确认（HTTP ${response.status}）`);
+    }
+    return payload;
+  }
+
   async like(bvid: string, like = true): Promise<{ ok: boolean; message: string }> {
     if (!this.csrf) return { ok: false, message: '登录态缺 bili_jct，点不了赞' };
     const form = new URLSearchParams({ bvid, like: like ? '1' : '2', csrf: this.csrf });
@@ -278,7 +302,7 @@ export class BiliReadClient {
       body: form,
       signal: AbortSignal.timeout(20_000),
     });
-    const payload = await response.json().catch(() => ({ code: -1, message: `HTTP ${response.status}` })) as Record<string, unknown>;
+    const payload = await this.readInteractionResponse(response);
     return Number(payload.code) === 0 ? { ok: true, message: like ? '已点赞' : '已取消点赞' } : { ok: false, message: `B站返回 ${String(payload.code)}：${String(payload.message || '')}` };
   }
 
@@ -292,7 +316,7 @@ export class BiliReadClient {
       body: form,
       signal: AbortSignal.timeout(20_000),
     });
-    const payload = await response.json().catch(() => ({ code: -1, message: `HTTP ${response.status}` })) as Record<string, unknown>;
+    const payload = await this.readInteractionResponse(response);
     return Number(payload.code) === 0 ? { ok: true, message: `已投 ${multiply} 币` } : { ok: false, message: `B站返回 ${String(payload.code)}：${String(payload.message || '')}` };
   }
 
@@ -514,6 +538,7 @@ export class BiliReadClient {
     }
     const message = `${ownerName ? `@${ownerName} ` : ''}${trimmed}`;
     const body = new URLSearchParams({ oid: String(info.aid), type: '1', message, csrf: this.csrf, plat: '1' });
+    if (ownerName && opts.mentionUid) body.set('at_name_to_mid', JSON.stringify({ [ownerName]: opts.mentionUid }));
     let imageUploaded = false;
     let imageError = '';
     if (opts.imagePath) {
@@ -538,7 +563,7 @@ export class BiliReadClient {
       body,
       signal: AbortSignal.timeout(20_000),
     });
-    const payload = await response.json().catch(() => ({ code: -1, message: `HTTP ${response.status}` })) as Record<string, unknown>;
+    const payload = await this.readInteractionResponse(response);
     const code = Number(payload.code ?? -1);
     if (code !== 0) return { ok: false, message: `B站返回 ${code}：${String(payload.message || '')}` };
     const data = payload.data && typeof payload.data === 'object' ? payload.data as Record<string, unknown> : {};
@@ -737,20 +762,28 @@ export class BiliReadClient {
     return info;
   }
 
-  async comments(bvid: string, limit = 8): Promise<BiliComment[]> {
+  async comments(bvid: string, limit = 8, latest = false): Promise<BiliComment[]> {
     const details = await this.info(bvid);
-    const payload = await this.json(`https://api.bilibili.com/x/v2/reply?type=1&oid=${details.aid}&sort=2&ps=${Math.max(1, Math.min(20, limit))}`);
+    const params = new URLSearchParams({ type: '1', oid: String(details.aid), ps: String(Math.max(1, Math.min(20, limit))) });
+    const route = latest ? 'reply/main' : 'reply';
+    if (latest) params.set('mode', '2');
+    else params.set('sort', '2');
+    const payload = await this.json(`https://api.bilibili.com/x/v2/${route}?${params}`);
     const data = payload.data && typeof payload.data === 'object' ? payload.data as Record<string, unknown> : {};
+    if (latest && !Array.isArray(data.replies) && data.replies !== null) throw new Error('B站未返回近期评论');
     const replies = Array.isArray(data.replies) ? data.replies : [];
     return replies.map((reply) => {
       const row = reply as Record<string, unknown>;
       const member = row.member && typeof row.member === 'object' ? row.member as Record<string, unknown> : {};
       const content = row.content && typeof row.content === 'object' ? row.content as Record<string, unknown> : {};
       return {
+        mid: String(row.mid || member.mid || ''),
         user: String(member.uname || ''),
         message: stripHtml(String(content.message || '')),
         like: Number(row.like || 0),
         at: new Date(Number(row.ctime || 0) * 1000).toISOString(),
+        rpid: Number(row.rpid || 0),
+        root: Number(row.root || 0),
       };
     }).filter((item) => item.message);
   }

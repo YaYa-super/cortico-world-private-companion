@@ -18,6 +18,17 @@ export interface PendingTrigger {
   threadId?: string;
 }
 
+/** 自己看之后，等角色决定分享时机的一次观看。 */
+export interface BiliWatchReview {
+  id: string;
+  bvid: string;
+  accountUid: string;
+  title: string;
+  at: string;
+  dueAt: string | null;
+  thought?: string;
+}
+
 /** 最近一次主动决策，面板用它画「为什么开口/没开口」的瀑布。 */
 export interface ProactiveDecisionRecord {
   at: string;
@@ -105,6 +116,7 @@ export interface CompanionState {
   restUntil: string;
   /** 事件/状态触发：等待正常主动路径消费；null 表示没有。 */
   pendingTrigger: PendingTrigger | null;
+  biliWatchReviews: BiliWatchReview[];
   /** 已触发过的 key → 时间，做每来源冷却。 */
   triggerSeen: Record<string, string>;
   /** 上一拍的日程 key / 睡眠状态，用于检测“刚开始/刚醒”。 */
@@ -274,6 +286,7 @@ export function createInitialState(now: Date, tz: string, cfg: CompanionConfig):
     updatedAt: now.toISOString(),
     restUntil: '',
     pendingTrigger: null,
+    biliWatchReviews: [],
     triggerSeen: {},
     lastAgendaKey: '',
     lastSleeping: false,
